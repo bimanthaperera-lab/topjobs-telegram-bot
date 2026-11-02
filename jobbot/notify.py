@@ -14,8 +14,8 @@ up to NOTIFY_PER_SITE (5) jobs from each site, so 5 + 5 with both on:
    started and haven't been posted yet (for up to NEW_FOR_HOURS after they
    first appeared).
 2. Then the site's pool: its newest jobs (NOTIFY_POOL_SIZE, 20, split evenly
-   between the sites: 10 each with both on), skipping any job posted in the
-   last NOTIFY_REPOST_HOURS (24).
+   between the sites: 10 each with both on) that were never posted. With
+   NOTIFY_REPOST_HOURS set, a job posted at least that long ago may go again.
 3. Nothing qualifies: nothing is posted.
 
 The new jobs of both sites go out first, then the pool jobs. Each job is the ad
@@ -33,7 +33,7 @@ Settings (environment):
     NOTIFY_STATE_FILE    default .notify-state/seen.json
     NOTIFY_PER_SITE      default 5 (jobs per site per run)
     NOTIFY_POOL_SIZE     default 20 (shared evenly between the sites)
-    NOTIFY_REPOST_HOURS  default 24 (e.g. 48 to repeat jobs less often)
+    NOTIFY_REPOST_HOURS  default unset: a posted job is never posted again
     SEND_JOB_IMAGES      default true
     XPRESSJOBS_ENABLED   default false; only with XpressJobs' permission
 """
@@ -122,7 +122,7 @@ class NotifySettings:
     send_images: bool = True
     xpressjobs_enabled: bool = False
     pool_size: int = 20
-    repost_hours: int = 24
+    repost_hours: int | None = None  # None: a posted job is never posted again
 
 
 def load_notify_settings() -> NotifySettings:
@@ -134,7 +134,8 @@ def load_notify_settings() -> NotifySettings:
         send_images=_bool("SEND_JOB_IMAGES", True),
         xpressjobs_enabled=_bool("XPRESSJOBS_ENABLED", False),
         pool_size=_int("NOTIFY_POOL_SIZE", 20, minimum=1),
-        repost_hours=_int("NOTIFY_REPOST_HOURS", 24, minimum=0),
+        repost_hours=(_int("NOTIFY_REPOST_HOURS", 0, minimum=0)
+                      if os.getenv("NOTIFY_REPOST_HOURS", "").strip() else None),
     )
 
 
@@ -211,18 +212,23 @@ def choose(per_site: Sequence[list[Job]], state: NotifyState, now: float,
 
     per_site: each site's jobs, newest first. Each site gets up to
     settings.per_site jobs: its new jobs first, then its pool (its newest
-    pool_size // sites) minus anything posted within repost_hours. Every site's
-    new jobs are posted before any pool job.
+    pool_size // sites) minus anything already posted (or, with repost_hours,
+    posted within that many hours). Every site's new jobs are posted before any
+    pool job.
     """
     share = max(1, settings.pool_size // max(1, len(per_site)))
-    cutoff = now - settings.repost_hours * 3600
+    cutoff = None if settings.repost_hours is None else now - settings.repost_hours * 3600
+
+    def can_post(url: str) -> bool:
+        last = state.posted.get(url)
+        return last is None or (cutoff is not None and last <= cutoff)
+
     new_picks: list[list[Job]] = []
     pool_picks: list[list[Job]] = []
     for jobs in per_site:
         new = [j for j in jobs if state.is_new(j.url, now)][: settings.per_site]
         new_urls = {j.url for j in new}
-        again = [j for j in jobs[:share]
-                 if j.url not in new_urls and state.posted.get(j.url, float("-inf")) <= cutoff]
+        again = [j for j in jobs[:share] if j.url not in new_urls and can_post(j.url)]
         new_picks.append(new)
         pool_picks.append(again[: settings.per_site - len(new)])
     return [(j, True) for j in _interleave(new_picks)] + [(j, False) for j in _interleave(pool_picks)]
@@ -322,8 +328,7 @@ async def run(settings: NotifySettings, sources: Sequence[JobSource], bot, now: 
     picks = choose([jobs for _, jobs in per_site], state, now, settings)
     if not picks:
         save_state(settings.state_file, state)
-        log.info("Nothing to post: no new jobs, and every pool job was posted in the last %dh",
-                 settings.repost_hours)
+        log.info("Nothing to post: no new jobs, and the pool's jobs were already posted")
         return status
 
     images = JobImages(Storage(":memory:"), sources, enabled=settings.send_images)
