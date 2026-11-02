@@ -12,6 +12,7 @@ from telegram.constants import ChatAction, ParseMode
 from telegram.error import BadRequest, TelegramError
 from telegram.ext import (
     Application,
+    AIORateLimiter,
     ApplicationBuilder,
     CallbackQueryHandler,
     CommandHandler,
@@ -20,9 +21,10 @@ from telegram.ext import (
     filters,
 )
 
-from .formatting import format_jobs
+from .formatting import format_job
 from .health import start_health_server
 from .job_service import PAGE_SIZE, FetchError, JobSearchService
+from .models import Job
 from .normalize import MAX_KEYWORD_LENGTH, normalize_keyword
 from .rate_limit import (
     REASON_COOLDOWN,
@@ -38,6 +40,8 @@ from .rate_limit import (
 log = logging.getLogger(__name__)
 
 SHOW_MORE_LABEL = "Thawa Jobs Pennanna (Show More)"
+JOB_BUTTON_LABEL = "🔗 View & Apply"
+MAX_BUTTON_URL = 2000
 CALLBACK_PREFIX = "more:"
 
 _NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
@@ -51,6 +55,8 @@ MSG_ASK_KEYWORD = "Please send a job keyword, for example <i>accountant</i>."
 MSG_TOO_LONG = f"That keyword is too long. Please keep it under {MAX_KEYWORD_LENGTH} characters."
 MSG_BUSY = "⏳ I'm still working on your previous search. Please wait for it to finish."
 MSG_SEARCHING = "🔎 Searching for <b>{keyword}</b> jobs..."
+MSG_FOUND = "🔎 Found {count} new job{plural} for <b>{keyword}</b>:"
+MSG_SHOWING = "Showing {shown} of {total}. Tap below for the rest."
 MSG_NO_NEW = (
     "No new jobs matching <b>{keyword}</b> right now. "
     "Either you've seen them all, or none fit. Try again later, or use different words."
@@ -164,19 +170,21 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await _edit_or_send(status, message.chat_id, context, f"{text}\n\n{notice}" if notice else text)
             return
 
-        header = f"Found jobs for <b>{escaped_keyword}</b>:"
-        if notice:
-            header = f"{header}\n{notice}"
-        markup = (
-            InlineKeyboardMarkup(
-                [[InlineKeyboardButton(SHOW_MORE_LABEL, callback_data=f"{CALLBACK_PREFIX}{result.more_session_id}")]]
-            )
-            if result.more_session_id
-            else None
-        )
-        await _send_pages(context, message.chat_id, format_jobs(result.first_page, header=header), markup)
+        # The "Searching..." message becomes the header, then one message per job.
+        total = len(result.first_page) + result.more_count
+        header = MSG_FOUND.format(count=total, plural="" if total == 1 else "s", keyword=escaped_keyword)
+        await _edit_or_send(status, message.chat_id, context, f"{header}\n{notice}" if notice else header)
+        await send_jobs(context.bot, message.chat_id, result.first_page, start_index=1)
         service.record_sent(user.id, keyword, result.first_page)
-        await _delete_quietly(status)
+
+        if result.more_session_id:
+            await context.bot.send_message(
+                message.chat_id,
+                MSG_SHOWING.format(shown=len(result.first_page), total=total),
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton(SHOW_MORE_LABEL, callback_data=f"{CALLBACK_PREFIX}{result.more_session_id}")]]
+                ),
+            )
     except RateLimitExceeded as exc:
         await _edit_or_send(status, message.chat_id, context, _limit_message(exc.decision))
     except FetchError:
@@ -214,7 +222,7 @@ async def show_more(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     try:
         # Numbering continues after the first page.
-        await _send_pages(context, chat_id, format_jobs(jobs, start_index=PAGE_SIZE + 1), None)
+        await send_jobs(context.bot, chat_id, jobs, start_index=PAGE_SIZE + 1)
         service.record_more_sent(user.id, jobs)
     except TelegramError:
         log.exception("Telegram error while sending Show More results")
@@ -224,18 +232,33 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     log.error("Unhandled error while processing an update", exc_info=context.error)
 
 
-async def _send_pages(
-    context: ContextTypes.DEFAULT_TYPE, chat_id: int, pages: list[str], markup: InlineKeyboardMarkup | None
-) -> None:
-    for i, page in enumerate(pages):
-        is_last = i == len(pages) - 1
-        await context.bot.send_message(
-            chat_id,
-            page,
-            parse_mode=ParseMode.HTML,
-            link_preview_options=_NO_PREVIEW,
-            reply_markup=markup if is_last else None,
-        )
+def job_keyboard(job: Job) -> InlineKeyboardMarkup | None:
+    """A 'View & Apply' button that opens the job page, or None if the URL can't be a button."""
+    if not job.url.lower().startswith(("https://", "http://")) or len(job.url) > MAX_BUTTON_URL:
+        return None
+    label = f"{JOB_BUTTON_LABEL} on {job.source}" if job.source else JOB_BUTTON_LABEL
+    return InlineKeyboardMarkup([[InlineKeyboardButton(label, url=job.url)]])
+
+
+async def send_job(bot, chat_id: int, job: Job, index: int) -> None:
+    """One job per message, with its link as an inline button under it."""
+    keyboard = job_keyboard(job)
+    if keyboard is not None:
+        try:
+            await bot.send_message(chat_id, format_job(job, index, include_link=False),
+                                   parse_mode=ParseMode.HTML, link_preview_options=_NO_PREVIEW,
+                                   reply_markup=keyboard)
+            return
+        except BadRequest as exc:
+            # Telegram rejects some URLs as buttons; fall back to a text link.
+            log.warning("Job button rejected (%s); sending a text link instead", exc)
+    await bot.send_message(chat_id, format_job(job, index, include_link=True),
+                           parse_mode=ParseMode.HTML, link_preview_options=_NO_PREVIEW)
+
+
+async def send_jobs(bot, chat_id: int, jobs: list[Job], start_index: int) -> None:
+    for offset, job in enumerate(jobs):
+        await send_job(bot, chat_id, job, start_index + offset)
 
 
 async def _edit_or_send(status, chat_id: int, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
@@ -249,15 +272,6 @@ async def _edit_or_send(status, chat_id: int, context: ContextTypes.DEFAULT_TYPE
         await context.bot.send_message(chat_id, text, parse_mode=ParseMode.HTML)
     except TelegramError:
         log.exception("Could not send a message to chat %s", chat_id)
-
-
-async def _delete_quietly(status) -> None:
-    if status is None:
-        return
-    try:
-        await status.delete()
-    except TelegramError:
-        pass
 
 
 async def _remove_button(query) -> None:
@@ -293,6 +307,7 @@ def build_application(
         ApplicationBuilder()
         .token(token)
         .concurrent_updates(True)
+        .rate_limiter(AIORateLimiter(max_retries=3))
         .post_init(post_init)
         .post_shutdown(post_shutdown)
         .build()

@@ -25,8 +25,11 @@ def telegram_length(text: str) -> int:
     return len(text.encode("utf-16-le")) // 2
 
 
-def format_job(job: Job, index: int | None = None) -> str:
-    """One job as HTML. Scraped text is escaped; missing fields are left out."""
+def format_job(job: Job, index: int | None = None, include_link: bool = True) -> str:
+    """One job as HTML. Scraped text is escaped; missing fields are left out.
+
+    include_link=False when the link is shown as an inline button instead.
+    """
     prefix = f"{index}. " if index is not None else ""
     lines = [f"<b>{prefix}{escape(truncate(job.title, _TITLE_MAX))}</b>"]
     if job.company:
@@ -41,7 +44,7 @@ def format_job(job: Job, index: int | None = None) -> str:
         lines.append(f"📝 {escape(truncate(job.description, DESCRIPTION_MAX))}")
     href = escape(job.url, quote=True)
     label = f"View on {escape(job.source)}" if job.source else "View job"
-    link = f'🔗 <a href="{href}">{label}</a>' if len(href) <= _URL_MAX else None
+    link = f'🔗 <a href="{href}">{label}</a>' if include_link and len(href) <= _URL_MAX else None
     if link:
         lines.append(link)
     block = "\n".join(lines)

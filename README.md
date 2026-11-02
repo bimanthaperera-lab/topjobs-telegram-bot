@@ -14,9 +14,16 @@ button sends the next 5.
 2. The user sends a keyword. The bot normalizes it: trim, lowercase, collapse spaces.
 3. The bot searches every enabled site in parallel. It reuses each site's cached results when
    they're fresh, and only contacts a site when it has to.
-4. It picks up to 10 jobs this user hasn't seen, alternating between the sites, and sends the
-   first 5. The other 5 are saved in SQLite behind a short session ID in the button.
-5. **Show More** sends those 5 from SQLite without contacting the sites, then removes the button.
+4. It ranks each site's results by relevance to the keyword (see `jobbot/relevance.py`). Then it
+   picks up to 10 jobs this user hasn't seen, alternating between the sites.
+5. The "Searching…" message turns into a header ("🔎 Found 8 new jobs for driver"). Then
+   **each job goes in its own message** with an inline **🔗 View & Apply** button that opens
+   the job page. If Telegram rejects a URL as a button, the bot sends a text link instead.
+6. If more jobs are waiting, a last message says "Showing 5 of 8" and has the **Show More**
+   button. The remaining jobs are saved in SQLite behind a short session ID.
+7. **Show More** sends them from SQLite without contacting the sites, then removes the button.
+   Messages are queued by PTB's rate limiter, so sending 5–7 messages in a row stays within
+   Telegram's flood limits.
 
 If a site can't be reached, the bot shows that site's earlier cached results, marked "may be
 outdated". If it has none, the bot shows the other site's jobs with a note saying so.

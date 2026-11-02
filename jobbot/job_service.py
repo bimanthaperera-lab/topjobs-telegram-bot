@@ -93,6 +93,7 @@ class SearchResult:
     more_session_id: str | None  # set when a Show More page is stored
     failed_sources: list[str] = field(default_factory=list)  # nothing to show from these
     stale_sources: list[str] = field(default_factory=list)   # showing older cached results
+    more_count: int = 0  # jobs waiting behind the Show More button
 
 
 @dataclass(frozen=True)
@@ -272,6 +273,7 @@ class JobSearchService:
             more_session_id=session_id,
             failed_sources=collected.failed_sources,
             stale_sources=collected.stale_sources,
+            more_count=len(rest),
         )
 
     def record_sent(self, user_id: int, keyword: str, jobs: list[Job]) -> None:

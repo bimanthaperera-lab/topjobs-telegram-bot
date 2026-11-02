@@ -1,12 +1,24 @@
-"""Bot wiring and message helpers (no Telegram network calls)."""
+"""Bot wiring, message helpers and handler flow (fake Telegram objects, no network)."""
+
+from types import SimpleNamespace
+
+from telegram.error import BadRequest
 
 from jobbot.bot import (
     CALLBACK_PREFIX,
+    JOB_BUTTON_LABEL,
     SHOW_MORE_LABEL,
-    _source_notice,
     _limit_message,
+    _source_notice,
     build_application,
+    job_keyboard,
+    search,
+    send_job,
+    send_jobs,
+    show_more,
 )
+from jobbot.formatting import format_job
+from jobbot.models import Job
 from jobbot.rate_limit import REASON_COOLDOWN, REASON_USER_FETCHES, Decision
 
 from .conftest import FakeSource, make_service
@@ -37,3 +49,143 @@ def test_source_notice():
 def test_limit_messages():
     assert "10 seconds" in _limit_message(Decision(False, REASON_COOLDOWN, 10))
     assert "today's limit" in _limit_message(Decision(False, REASON_USER_FETCHES, 7200))
+
+
+# --- one message per job, with an inline button --------------------------------
+
+JOB =Job(url="https://www.topjobs.lk/employer/JobAdvertismentServlet?ac=A&jc=1", title="Software Engineer",
+          company="Acme", source="TopJobs.lk")
+
+
+class FakeBot:
+    def __init__(self, reject_buttons=False):
+        self.sent = []
+        self.reject_buttons = reject_buttons
+
+    async def send_message(self, chat_id, text, **kwargs):
+        if self.reject_buttons and kwargs.get("reply_markup") is not None and "url" in str(kwargs["reply_markup"]):
+            raise BadRequest("Button_url_invalid")
+        self.sent.append(SimpleNamespace(chat_id=chat_id, text=text, **kwargs))
+
+    async def send_chat_action(self, *args, **kwargs):
+        pass
+
+
+def button(msg):
+    return msg.reply_markup.inline_keyboard[0][0]
+
+
+def test_job_keyboard_opens_job_page():
+    kb = job_keyboard(JOB)
+    btn = kb.inline_keyboard[0][0]
+    assert btn.url == JOB.url
+    assert btn.text == f"{JOB_BUTTON_LABEL} on TopJobs.lk"
+
+
+def test_job_keyboard_skips_bad_urls():
+    assert job_keyboard(Job(url="javascript:alert(1)", title="x")) is None
+    assert job_keyboard(Job(url="https://x.lk/" + "a" * 3000, title="x")) is None
+
+
+def test_text_has_no_link_when_button_used():
+    assert "<a href" not in format_job(JOB, 1, include_link=False)
+    assert "<a href" in format_job(JOB, 1, include_link=True)
+
+
+async def test_send_job_uses_button():
+    bot = FakeBot()
+    await send_job(bot, 42, JOB, 3)
+    (msg,) = bot.sent
+    assert msg.text.startswith("<b>3. Software Engineer")
+    assert "<a href" not in msg.text
+    assert button(msg).url == JOB.url
+
+
+async def test_send_job_falls_back_to_text_link_if_button_rejected():
+    bot = FakeBot(reject_buttons=True)
+    await send_job(bot, 42, JOB, 1)
+    (msg,) = bot.sent
+    assert getattr(msg, "reply_markup", None) is None
+    assert "<a href" in msg.text
+
+
+async def test_send_jobs_one_message_each_numbered():
+    bot = FakeBot()
+    jobs = [Job(url=f"https://x.lk/{i}", title=f"Job {i}") for i in range(3)]
+    await send_jobs(bot, 42, jobs, start_index=6)
+    assert [m.text.split("</b>")[0] for m in bot.sent] == ["<b>6. Job 0", "<b>7. Job 1", "<b>8. Job 2"]
+    assert all(button(m).url.startswith("https://x.lk/") for m in bot.sent)
+
+
+# --- full handler flow with fake Telegram objects ------------------------------
+
+class FakeStatus:
+    def __init__(self):
+        self.edits = []
+
+    async def edit_text(self, text, **kwargs):
+        self.edits.append(text)
+
+
+class FakeMessage:
+    def __init__(self, text):
+        self.text = text
+        self.chat_id = 42
+        self.status = FakeStatus()
+        self.replies = []
+
+    async def reply_text(self, text, **kwargs):
+        self.replies.append(text)
+        return self.status
+
+
+class FakeQuery:
+    def __init__(self, data):
+        self.data = data
+        self.message = SimpleNamespace(chat=SimpleNamespace(id=42))
+        self.answers = []
+        self.markup_removed = False
+
+    async def answer(self, *args, **kwargs):
+        self.answers.append((args, kwargs))
+
+    async def edit_message_reply_markup(self, reply_markup=None):
+        self.markup_removed = True
+
+
+def fake_context(service, bot):
+    app = SimpleNamespace(bot_data={"service": service, "limiter": None})
+    return SimpleNamespace(application=app, bot=bot)
+
+
+async def test_search_then_show_more_flow(storage):
+    jobs = [Job(url=f"https://x.lk/{i}", title=f"Driver {i}", source="TopJobs.lk") for i in range(8)]
+    service = make_service(storage, FakeSource(jobs=jobs))
+    bot = FakeBot()
+    ctx = fake_context(service, bot)
+    msg = FakeMessage("  Driver ")
+    await search(SimpleNamespace(effective_message=msg, effective_user=SimpleNamespace(id=7)), ctx)
+
+    assert msg.replies[0].startswith("🔎 Searching")
+    assert msg.status.edits == ["🔎 Found 8 new jobs for <b>driver</b>:"]  # header replaces "Searching..."
+    job_msgs, footer = bot.sent[:5], bot.sent[5]
+    assert len(bot.sent) == 6
+    assert all(button(m).url.startswith("https://x.lk/") for m in job_msgs)  # one job per message
+    assert footer.text == "Showing 5 of 8. Tap below for the rest."
+    assert button(footer).text == "Thawa Jobs Pennanna (Show More)"
+
+    query = FakeQuery(button(footer).callback_data)
+    await show_more(SimpleNamespace(callback_query=query, effective_user=SimpleNamespace(id=7)), ctx)
+    assert query.markup_removed
+    more = bot.sent[6:]
+    assert [m.text.split("</b>")[0] for m in more] == ["<b>6. Driver 5", "<b>7. Driver 6", "<b>8. Driver 7"]
+
+
+async def test_no_footer_when_everything_fits(storage):
+    jobs = [Job(url=f"https://x.lk/{i}", title=f"Driver {i}") for i in range(2)]
+    bot = FakeBot()
+    msg = FakeMessage("driver")
+    await search(SimpleNamespace(effective_message=msg, effective_user=SimpleNamespace(id=7)),
+                 fake_context(make_service(storage, FakeSource(jobs=jobs)), bot))
+    assert msg.status.edits == ["🔎 Found 2 new jobs for <b>driver</b>:"]
+    assert len(bot.sent) == 2 and all(button(m).url for m in bot.sent)
