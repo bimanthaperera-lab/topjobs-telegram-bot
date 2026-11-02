@@ -46,3 +46,7 @@ services:
         value: "500"
       - key: ADMIN_USER_IDS
         sync: false
+      - key: REQUIRED_CHANNEL
+        sync: false
+      - key: REQUIRED_CHANNEL_LINK
+        sync: false

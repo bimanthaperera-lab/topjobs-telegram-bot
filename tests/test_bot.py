@@ -34,8 +34,7 @@ from .conftest import FakeSource, make_service
 def test_application_builds_with_handlers(storage):
     app = build_application("123456:" + "A" * 35, make_service(storage, FakeSource()))
     names = sorted(type(h).__name__ for h in app.handlers[0])
-    assert names == ["CallbackQueryHandler", "CallbackQueryHandler", "CommandHandler", "CommandHandler",
-                     "MessageHandler"]
+    assert names == ["CallbackQueryHandler"] * 3 + ["CommandHandler"] * 2 + ["MessageHandler"]
 
 
 def test_show_more_label_and_callback_size():

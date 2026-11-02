@@ -10,6 +10,7 @@ import tempfile
 from telegram import Update
 
 from .bot import build_application
+from .channel_gate import ChannelGate
 from .config import ConfigError, Settings, load_settings
 from .images import JobImages
 from .job_service import SESSION_MAX_AGE_SECS, JobSearchService
@@ -85,9 +86,15 @@ def main() -> int:
         notify=notifier,
     )
 
+    gate = None
+    if settings.required_channel:
+        # Admins skip the check, so a setup mistake can't lock them out too.
+        gate = ChannelGate(settings.required_channel, settings.required_channel_link,
+                           exempt_user_ids=settings.rate_limit.admin_user_ids)
+        log.info("Users must join %s before using the bot", settings.required_channel)
     app = build_application(
         settings.telegram_bot_token, service, limiter, settings.health_port,
-        shutdown_hooks=[http.aclose], images=images,
+        shutdown_hooks=[http.aclose], images=images, gate=gate,
     )
     notifier.bind(app.bot)
     if not settings.rate_limit.admin_user_ids:

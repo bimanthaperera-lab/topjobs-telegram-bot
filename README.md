@@ -65,6 +65,7 @@ jobbot/
   __main__.py          entry point (python -m jobbot)
   config.py            .env loading and validation
   site_health.py       tracks failing sites and alerts the admins
+  channel_gate.py      users must join a channel before using the bot (optional)
   sources/
     http.py            shared httpx client: per-site request gap, retries, pause on 403/429
     topjobs.py         TopJobs.lk HTML parser
@@ -146,10 +147,19 @@ token redaction.
 | `RATE_LIMIT_USER_FETCHES_PER_DAY` | 30 | Searches per user per 24h that have to contact the sites |
 | `RATE_LIMIT_GLOBAL_FETCHES_PER_DAY` | 500 | Hard cap on site requests per 24h, across all users |
 | `ADMIN_USER_IDS` | empty | Telegram IDs that skip the per-user limits **and get site alerts**. Each admin must press `/start` in the bot once |
+| `REQUIRED_CHANNEL` | empty | Users must join this channel before using the bot: `@channelname` (or its `t.me` link), or a private channel's id (`-100…`). The bot must be an **admin** of that channel. Empty = anyone can use the bot |
+| `REQUIRED_CHANNEL_LINK` | `https://t.me/<name>` | The **📢 Join channel** button's link. Required for a private channel (its invite link, `https://t.me/+…`) |
 | `DATABASE_PATH` | `jobbot.sqlite3` | SQLite file |
 | `LOG_LEVEL` | INFO | Logging level |
 
 Setting any `RATE_LIMIT_*` value to `0` disables that limit.
+
+**Required channel:** with `REQUIRED_CHANNEL` set, a user who hasn't joined gets **📢 Join
+channel** and **✅ I've joined** buttons instead of results, for every command, keyword and
+button. Telegram only tells a bot who is in a channel where the bot is an admin, so add the
+bot as an admin first (it already is if this is the alerts channel). If the check fails
+anyway, the bot lets users in and logs a warning, so a setup mistake can't lock everyone
+out. A "joined" answer is reused for 10 minutes, and `ADMIN_USER_IDS` skip the check.
 
 ## Being a good guest on the job sites
 

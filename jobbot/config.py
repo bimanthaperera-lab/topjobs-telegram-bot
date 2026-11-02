@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 
 from dotenv import load_dotenv
 
+from .channel_gate import channel_link
 from .rate_limit import RateLimitConfig
 from .sources.http import DEFAULT_USER_AGENT
 
@@ -35,6 +36,9 @@ class Settings:
     database_path: str = "jobbot.sqlite3"
     log_level: str = "INFO"
     health_port: int | None = None
+    # Users must join this channel ("@name" or "-100...") before using the bot; None = open.
+    required_channel: str | None = None
+    required_channel_link: str | None = None  # the Join button's URL
     rate_limit: RateLimitConfig = field(default_factory=RateLimitConfig)
     # Non-fatal problems found while loading, logged at startup.
     warnings: tuple[str, ...] = ()
@@ -100,6 +104,7 @@ def load_settings(env_file: str | None = ".env") -> Settings:
     if not (topjobs_enabled or xpressjobs_enabled):
         raise ConfigError("Enable at least one job site: TOPJOBS_ENABLED or XPRESSJOBS_ENABLED.")
     warnings: list[str] = []
+    required_channel, required_channel_link = _required_channel()
     return Settings(
         telegram_bot_token=_required("TELEGRAM_BOT_TOKEN"),
         topjobs_enabled=topjobs_enabled,
@@ -118,6 +123,8 @@ def load_settings(env_file: str | None = ".env") -> Settings:
         log_level=os.getenv("LOG_LEVEL", "").strip().upper() or "INFO",
         # Render (and most PaaS hosts) set PORT; leave unset locally to skip the HTTP endpoint.
         health_port=_int("PORT", 0, minimum=0) or None,
+        required_channel=required_channel,
+        required_channel_link=required_channel_link,
         rate_limit=RateLimitConfig(
             cooldown_secs=_int("RATE_LIMIT_COOLDOWN_SECS", 10, minimum=0),
             searches_per_hour=_int("RATE_LIMIT_SEARCHES_PER_HOUR", 20, minimum=0),
@@ -163,6 +170,27 @@ def _category() -> str | None:
     if raw is None:
         return "SDQ"
     return raw.strip().upper() or None  # set but empty: search all jobs by keyword
+
+
+_CHANNEL_URL = re.compile(r"^(?:https?://)?t\.me/([A-Za-z0-9_]{4,})/?$")
+
+
+def _required_channel() -> tuple[str | None, str | None]:
+    channel = os.getenv("REQUIRED_CHANNEL", "").strip()
+    if not channel:
+        return None, None
+    url = _CHANNEL_URL.match(channel)
+    if url:
+        channel = f"@{url.group(1)}"  # a pasted t.me link means the same public channel
+    if not (re.fullmatch(r"@[A-Za-z0-9_]{4,}", channel) or re.fullmatch(r"-100\d+", channel)):
+        raise ConfigError("REQUIRED_CHANNEL must be @channelname or a numeric channel id (-100...).")
+    link = os.getenv("REQUIRED_CHANNEL_LINK", "").strip() or channel_link(channel)
+    if link is None:
+        raise ConfigError("REQUIRED_CHANNEL is a numeric (private) channel id, so set REQUIRED_CHANNEL_LINK "
+                          "to its invite link (https://t.me/+...).")
+    if not link.startswith("https://"):
+        raise ConfigError("REQUIRED_CHANNEL_LINK must start with https://")
+    return channel, link
 
 
 def _admin_ids(warnings: list[str]) -> frozenset[int]:
