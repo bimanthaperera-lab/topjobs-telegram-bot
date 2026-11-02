@@ -138,14 +138,28 @@ def test_place_name_in_keyword_does_not_hide_results():
 
 # --- applied inside the search service ----------------------------------------
 
-async def test_service_ranks_before_trimming(storage):
-    """A good match deep in the site's list must survive the per-site cap."""
+async def test_service_finds_match_deep_in_site_list(storage):
+    """A good match far down the site's list must still be found."""
     noise = [f"Mechanical Engineer {i}" for i in range(60)]
     page = noise + ["Software Engineer"]  # the only real match is last
     source = FakeSource(jobs=jobs_from(page))
-    service = make_service(storage, source, rank_results=True, jobs_per_source=30)
+    service = make_service(storage, source, rank_results=True)
     result = await service.search(1, "software engineer")
     assert titles(result.first_page) == ["Software Engineer"]
+
+
+async def test_repeat_searches_reach_every_match(storage):
+    """Searching the same keyword again keeps going until every match was sent."""
+    page = [f"React Developer {i}" for i in range(50)]
+    service = make_service(storage, FakeSource(jobs=jobs_from(page)), rank_results=True)
+    sent = []
+    for _ in range(6):
+        result = await service.search(1, "react developer")
+        service.record_sent(1, "react developer", result.first_page)
+        more = service.show_more(1, result.more_session_id) if result.more_session_id else []
+        service.record_more_sent(1, more)
+        sent += result.first_page + more
+    assert sorted(titles(sent)) == sorted(page)
 
 
 async def test_service_asks_site_for_more_than_it_keeps(storage):
