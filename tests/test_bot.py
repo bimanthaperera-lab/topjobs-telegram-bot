@@ -208,7 +208,7 @@ def test_categories_are_valid_buttons():
     assert len(ids) == len(set(ids))
     for c in CATEGORIES:
         assert len((CATEGORY_PREFIX + c.id).encode()) <= 64  # Telegram's callback_data limit
-        assert c.keyword == normalize_keyword(c.keyword)  # same form as a typed keyword
+        assert c.phrases and all(p == normalize_keyword(p) for p in c.phrases)  # same form as typed
         assert category_by_id(c.id) is c
     assert category_by_id("nope") is None
 
@@ -228,8 +228,9 @@ async def test_start_and_categories_show_the_menu():
         assert msg.reply_markups[0].inline_keyboard == category_keyboard().inline_keyboard
 
 
-async def test_category_button_searches_its_keyword(storage):
+async def test_category_button_searches_its_phrases(storage):
     jobs = [Job(url=f"https://x.lk/{i}", title=f"QA Engineer {i}", source="TopJobs.lk") for i in range(2)]
+    jobs.append(Job(url="https://x.lk/acc", title="Accountant", source="TopJobs.lk"))  # no phrase matches
     bot = FakeBot()
     query = FakeQuery(f"{CATEGORY_PREFIX}qa")
     await choose_category(SimpleNamespace(callback_query=query, effective_user=SimpleNamespace(id=7)),
@@ -237,8 +238,8 @@ async def test_category_button_searches_its_keyword(storage):
     assert query.answers == [((), {})]
     assert not query.markup_removed  # the menu stays for the next pick
     texts = [m.text for m in bot.sent]
-    assert texts[0].startswith("🔎 Searching for <b>qa</b>")
-    assert "🔎 Found 2 new jobs for <b>qa</b>:" in texts
+    assert texts[0].startswith("🔎 Searching for <b>🧪 QA / Testing</b>")
+    assert "🔎 Found 2 new jobs for <b>🧪 QA / Testing</b>:" in texts
     assert sum(1 for m in bot.sent if getattr(m, "reply_markup", None) and button(m).url) == 2
 
 

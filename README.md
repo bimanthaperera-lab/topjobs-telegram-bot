@@ -15,9 +15,10 @@ A Telegram bot for **IT and software jobs** in Sri Lanka. It reads **TopJobs.lk*
 ## How it works
 
 1. `/start`: the bot welcomes the user and shows a **category menu** (Software Engineer,
-   QA / Testing, DevOps, Data, Graphic Design, Internships and more; `/categories` shows it
-   again). Tapping a category is the same as typing its keyword (see `jobbot/categories.py`),
-   so it costs no extra site requests.
+   QA / Testing, Data, Help Desk / Support, Networking, Internships and more; `/categories`
+   shows it again). A category is a list of title phrases, most wanted first (see
+   `jobbot/categories.py`): only titles with every word of a phrase are shown, best kind
+   first. It reads the same cached IT list, so it costs no extra site requests.
 2. Or the user sends a keyword. The bot normalizes it: trim, lowercase, collapse spaces.
 3. TopJobs can't combine a keyword with a category, so the bot fetches the whole
    **IT-Software category** (`TOPJOBS_CATEGORY=SDQ`, about 160 jobs) in **one request**. It

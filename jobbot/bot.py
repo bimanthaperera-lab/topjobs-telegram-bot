@@ -167,8 +167,8 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def choose_category(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """A category button: the same search as typing its keyword. The menu stays, so the
-    user can tap another category later."""
+    """A category button: searches the category's title phrases, best kind first. The
+    menu stays, so the user can tap another category later."""
     query = update.callback_query
     user = update.effective_user
     if query is None or user is None:
@@ -179,13 +179,14 @@ async def choose_category(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     await query.answer()
     chat_id = query.message.chat.id if query.message else user.id
-    await _run_search(context, chat_id, user.id, category.keyword,
-                      functools.partial(context.bot.send_message, chat_id))
+    await _run_search(context, chat_id, user.id, category.label,
+                      functools.partial(context.bot.send_message, chat_id), any_of=category.phrases)
 
 
 async def _run_search(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int, keyword: str,
-                      reply: Callable[..., Awaitable]) -> None:
-    """Search and send the results. reply(text, **kwargs) sends a message to the chat."""
+                      reply: Callable[..., Awaitable], any_of: tuple[str, ...] = ()) -> None:
+    """Search and send the results. reply(text, **kwargs) sends a message to the chat.
+    any_of: a category's phrases; keyword is then the category's label."""
     # Checks and records below have no await in between, so they are atomic on the event loop.
     active = _active_users(context)
     if user_id in active:
@@ -209,7 +210,7 @@ async def _run_search(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id:
         await context.bot.send_chat_action(chat_id, ChatAction.TYPING)
 
         service = _service(context)
-        result = await service.search(user_id, keyword)
+        result = await service.search(user_id, keyword, any_of)
 
         notice = _source_notice(result.failed_sources, result.stale_sources)
         if not result.first_page:
