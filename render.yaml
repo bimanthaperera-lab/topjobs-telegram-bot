@@ -3,39 +3,42 @@
 services:
   - type: web
     name: topjobs-telegram-bot
-    runtime: python
+    runtime: docker
     plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: python -m jobbot
     healthCheckPath: /health
-    autoDeploy: true
+    branch: main
+    # Deploy a push to main only after GitHub Actions (.github/workflows/ci.yml) passes.
+    autoDeployTrigger: checksPass
     envVars:
-      - key: PYTHON_VERSION
-        value: "3.12.10"
-      # Secrets: Render asks for these when the Blueprint is created. Never commit them.
+      # Secret: Render asks for it when the Blueprint is created. Never commit it.
       - key: TELEGRAM_BOT_TOKEN
         sync: false
-      - key: APIFY_API_TOKEN
-        sync: false
-      - key: APIFY_ACTOR_ID
-        value: fanndev/topjobs-lk-scraper
-      - key: APIFY_MEMORY_MB
-        value: "256"
-      - key: APIFY_FALLBACK_MEMORY_MB
-        value: "1024"
-      - key: APIFY_TIMEOUT_SECS
-        value: "120"
+      - key: TOPJOBS_ENABLED
+        value: "true"
+      # Only set to "true" once XpressJobs has given written permission.
+      - key: XPRESSJOBS_ENABLED
+        value: "false"
+      - key: SCRAPE_MIN_INTERVAL_SECS
+        value: "2"
+      - key: HTTP_TIMEOUT_SECS
+        value: "20"
       - key: CACHE_TTL_HOURS
         value: "6"
+      - key: HTTP_RETRIES
+        value: "2"
+      - key: SITE_BACKOFF_MINUTES
+        value: "30"
+      - key: STALE_CACHE_MAX_HOURS
+        value: "48"
+      - key: ALERT_AFTER_FAILURES
+        value: "3"
       - key: RATE_LIMIT_COOLDOWN_SECS
         value: "10"
       - key: RATE_LIMIT_SEARCHES_PER_HOUR
         value: "20"
-      - key: RATE_LIMIT_USER_RUNS_PER_DAY
-        value: "5"
-      - key: RATE_LIMIT_GLOBAL_RUNS_PER_DAY
-        value: "200"
+      - key: RATE_LIMIT_USER_FETCHES_PER_DAY
+        value: "30"
+      - key: RATE_LIMIT_GLOBAL_FETCHES_PER_DAY
+        value: "500"
       - key: ADMIN_USER_IDS
         sync: false
-      - key: APIFY_FETCH_FULL_DETAILS
-        value: "true"

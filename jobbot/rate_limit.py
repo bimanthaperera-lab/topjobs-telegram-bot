@@ -1,7 +1,8 @@
-"""Abuse protection: per-user search limits and per-user / global Actor run budgets.
+"""Abuse protection: per-user search limits and per-user / global site-request budgets.
 
 Events are stored in SQLite so limits survive restarts. A limit of 0 disables it.
-Cache hits and Show More clicks never count toward the Actor run budgets.
+Cache hits and Show More clicks never count toward the fetch budgets, which
+protect the job sites (and the server's IP) from being hammered.
 """
 
 from __future__ import annotations
@@ -15,20 +16,20 @@ HOUR = 3600
 DAY = 24 * HOUR
 
 KIND_SEARCH = "search"
-KIND_ACTOR_RUN = "actor_run"
+KIND_FETCH = "fetch"
 
 REASON_COOLDOWN = "cooldown"
 REASON_HOURLY = "hourly"
-REASON_USER_RUNS = "user_runs"
-REASON_GLOBAL_RUNS = "global_runs"
+REASON_USER_FETCHES = "user_fetches"
+REASON_GLOBAL_FETCHES = "global_fetches"
 
 
 @dataclass(frozen=True)
 class RateLimitConfig:
     cooldown_secs: int = 10
     searches_per_hour: int = 20
-    user_runs_per_day: int = 5
-    global_runs_per_day: int = 200
+    user_fetches_per_day: int = 30
+    global_fetches_per_day: int = 500
     admin_user_ids: frozenset[int] = frozenset()
 
 
@@ -86,20 +87,20 @@ class RateLimiter:
     def record_search(self, user_id: int) -> None:
         self._storage.add_rate_event(KIND_SEARCH, user_id)
 
-    def check_actor_run(self, user_id: int) -> Decision:
-        # The global budget protects the Apify bill, so it applies to admins too.
-        blocked = self._window(KIND_ACTOR_RUN, self._config.global_runs_per_day, DAY, None)
+    def check_fetch(self, user_id: int) -> Decision:
+        # The global budget protects the sites, so it applies to admins too.
+        blocked = self._window(KIND_FETCH, self._config.global_fetches_per_day, DAY, None)
         if blocked:
-            return Decision(False, REASON_GLOBAL_RUNS, blocked.retry_after_secs)
+            return Decision(False, REASON_GLOBAL_FETCHES, blocked.retry_after_secs)
         if self.is_admin(user_id):
             return Decision.ok()
-        blocked = self._window(KIND_ACTOR_RUN, self._config.user_runs_per_day, DAY, user_id)
+        blocked = self._window(KIND_FETCH, self._config.user_fetches_per_day, DAY, user_id)
         if blocked:
-            return Decision(False, REASON_USER_RUNS, blocked.retry_after_secs)
+            return Decision(False, REASON_USER_FETCHES, blocked.retry_after_secs)
         return Decision.ok()
 
-    def record_actor_run(self, user_id: int) -> None:
-        self._storage.add_rate_event(KIND_ACTOR_RUN, user_id)
+    def record_fetch(self, user_id: int) -> None:
+        self._storage.add_rate_event(KIND_FETCH, user_id)
 
     def purge(self) -> int:
         return self._storage.purge_rate_events(DAY)

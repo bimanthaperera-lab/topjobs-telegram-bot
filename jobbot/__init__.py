@@ -1,1 +1,1 @@
-"""Telegram job search bot backed by an Apify Actor."""
+"""Telegram job search bot for Sri Lankan job sites (TopJobs.lk, XpressJobs)."""

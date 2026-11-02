@@ -13,6 +13,8 @@ class Job:
     location: str | None = None
     posted: str | None = None
     description: str | None = None
+    closing: str | None = None
+    source: str | None = None  # display name of the site, e.g. "TopJobs.lk"
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -26,4 +28,6 @@ class Job:
             location=data.get("location"),
             posted=data.get("posted"),
             description=data.get("description"),
+            closing=data.get("closing"),
+            source=data.get("source"),
         )

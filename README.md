@@ -1,57 +1,61 @@
-# TopJobs.lk Telegram Job Search Bot
+# Sri Lanka Job Search Telegram Bot
 
-A Telegram bot that searches [TopJobs.lk](https://topjobs.lk) through the Apify Actor
-[`fanndev/topjobs-lk-scraper`](https://apify.com/fanndev/topjobs-lk-scraper). It sends 5 jobs
-per search, has a **Thawa Jobs Pennanna (Show More)** button for the next 5, and is built to
-keep Apify spending low.
+A Telegram bot that searches **TopJobs.lk** and **XpressJobs** directly. It needs no Apify or any
+other paid scraping service. Each search sends 5 jobs, and a **Thawa Jobs Pennanna (Show More)**
+button sends the next 5.
+
+> **XpressJobs is switched off by default.** Its terms of use forbid scraping
+> ("spider, crawl, or scrape") without permission. Set `XPRESSJOBS_ENABLED=true` only after
+> XpressJobs has given you written permission.
 
 ## How it works
 
 1. `/start`: the bot welcomes the user and asks for a keyword.
 2. The user sends a keyword. The bot normalizes it: trim, lowercase, collapse spaces.
-3. The bot gets up to 10 jobs this user hasn't seen. It uses the shared cache when it can and runs the Actor only when it has to.
-4. It sends the first 5 jobs. The other 5 are saved in SQLite behind a short session ID that goes in the button.
-5. **Show More** sends those 5 from SQLite, never from the Actor, and removes the button.
+3. The bot searches every enabled site in parallel. It reuses each site's cached results when
+   they're fresh, and only contacts a site when it has to.
+4. It picks up to 10 jobs this user hasn't seen, alternating between the sites, and sends the
+   first 5. The other 5 are saved in SQLite behind a short session ID in the button.
+5. **Show More** sends those 5 from SQLite without contacting the sites, then removes the button.
+
+If a site can't be reached, the bot shows that site's earlier cached results, marked "may be
+outdated". If it has none, the bot shows the other site's jobs with a note saying so.
+
+## Sites
+
+| | TopJobs.lk | XpressJobs |
+|---|---|---|
+| How | HTML search page, `GET /applicant/vacancybyfunctionalarea.jsp?txtKeyWord=` | JSON API, `GET /api/jobs/searchJobs?keyword=` |
+| Order | Newest first, by opening date | Re-sorted newest first by `jobId` |
+| Title / company / location | yes | yes |
+| Posted date | yes | when the API provides it |
+| Closing date | yes | yes |
+| Description | Short note only; full ads are images | Job type + `overview` text |
+| robots.txt / terms | no robots.txt, no scraping clause found | robots.txt allows all; **terms forbid scraping** |
+
+Code lives in [`jobbot/sources/`](jobbot/sources/). Adding another site means writing one class
+with `name`, `sorted_newest_first` and `async fetch(keyword, limit)`.
 
 ## Project structure
 
 ```
 jobbot/
-  __main__.py        entry point (python -m jobbot)
-  config.py          .env loading and validation
-  actor_mapping.py   Actor input + output -> Job mapping (Actor-specific code lives here)
-  apify_service.py   async Actor runs: memory, fallback, timeout, item limits
-  job_service.py     cache, shared in-flight runs, duplicate filtering, paging
-  rate_limit.py      per-user and global abuse limits
-  storage.py         SQLite (cache, sent history, Show More sessions, rate events)
-  formatting.py      HTML-escaped messages under 4096 chars
-  bot.py             Telegram handlers
-  logging_setup.py   log formatter that redacts tokens
-tests/               pytest suite (no network)
+  __main__.py          entry point (python -m jobbot)
+  config.py            .env loading and validation
+  site_health.py       tracks failing sites and alerts the admins
+  sources/
+    http.py            shared httpx client: per-site request gap, retries, pause on 403/429
+    topjobs.py         TopJobs.lk HTML parser
+    xpressjobs.py      XpressJobs JSON API client
+  job_service.py       per-site cache, shared in-flight requests, duplicate filtering, paging
+  rate_limit.py        per-user and global abuse limits
+  storage.py           SQLite (cache, sent history, Show More sessions, rate events)
+  formatting.py        HTML-escaped messages under 4096 chars
+  health.py            /health endpoint for Render + UptimeRobot
+  bot.py               Telegram handlers
+  logging_setup.py     log formatter that redacts the bot token
+tests/                 pytest suite (no network)
 ```
-
-## Actor field mapping
-
-| Bot field   | Actor output field(s)                                                    |
-|-------------|--------------------------------------------------------------------------|
-| Title       | `position`                                                               |
-| Company     | `employer`                                                               |
-| Location    | `location` (full detail) or `town` (compact)                             |
-| Posted date | `openingDate` (compact) or `jsonLd.datePosted`                           |
-| Description | `jsonLd.description`; if missing, `jobType` badges + `closingDate`       |
-| Link        | `detailUrl`                                                              |
-
-Items with `_error`, without a title, or without an http(s) link are skipped.
-
-The input sent is `{"mode": "search", "keyword": ..., "maxResults": 10, "fetchFullDetails": ...}`.
-
-**Limits of this Actor:**
-- TopJobs.lk publishes job descriptions as images, so a real text description exists only
-  when `jsonLd` has one. Otherwise the bot shows the job type and closing date instead.
-- The Actor has no "sort by newest" option. Early stopping at the last-sent URL is therefore
-  **disabled** (`ACTOR_SORTS_NEWEST = False` in `actor_mapping.py`), and the bot logs a warning at
-  startup. Duplicates are still filtered by each user's sent-URL history. If you switch to an Actor
-  that can sort by date, set the flag to `True` and add the sort option to `build_run_input()`.
 
 ## Setup
 
@@ -73,12 +77,7 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Fill in `.env`:
-
-- `TELEGRAM_BOT_TOKEN` from [@BotFather](https://t.me/BotFather)
-- `APIFY_API_TOKEN` from Apify Console → Settings → API & Integrations
-- `APIFY_ACTOR_ID` (already set to `fanndev/topjobs-lk-scraper`)
-
+Put your bot token from [@BotFather](https://t.me/BotFather) into `TELEGRAM_BOT_TOKEN` in `.env`.
 `.env` is in `.gitignore`. Never commit it.
 
 ## Run
@@ -97,123 +96,126 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-The tests cover keyword normalization, duplicate filtering, stopping at the saved URL, pagination
-(including double clicks and expired buttons), cache expiry and shared runs, rate limits, memory
-fallback, HTML escaping, the message length limit and token redaction.
+The tests cover keyword normalization, duplicate filtering, stopping at the saved URL for each
+site, mixing two sites, pagination (including double clicks and expired buttons), cache expiry,
+shared requests, one site failing, retries and the pause after a block, stale-cache fallback,
+admin alerts, rate limits, both parsers, request spacing, HTML escaping, message length and
+token redaction.
 
 ## Configuration
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | required | Bot token |
-| `APIFY_API_TOKEN` | required | Apify token |
-| `APIFY_ACTOR_ID` | required | `fanndev/topjobs-lk-scraper` |
-| `APIFY_MEMORY_MB` | 256 | Memory for every run (raised to the Actor's minimum if it declares a higher one) |
-| `APIFY_FALLBACK_MEMORY_MB` | 1024 | One retry at this memory when a run fails for lack of memory |
-| `APIFY_TIMEOUT_SECS` | 120 | Run timeout on Apify; runs still going are aborted |
-| `CACHE_TTL_HOURS` | 6 | How long a keyword's results are reused across all users |
+| `TOPJOBS_ENABLED` | true | Search TopJobs.lk |
+| `XPRESSJOBS_ENABLED` | **false** | Search XpressJobs. Turn on only with their permission |
+| `SCRAPE_MIN_INTERVAL_SECS` | 2 | Minimum gap between requests to the same site, across all users |
+| `HTTP_TIMEOUT_SECS` | 20 | Request timeout |
+| `HTTP_RETRIES` | 2 | Retries for timeouts and 5xx errors, waiting 2s, then 4s |
+| `SITE_BACKOFF_MINUTES` | 30 | After a 403/429, how long to stop contacting that site (longer if the site's `Retry-After` asks for it) |
+| `STALE_CACHE_MAX_HOURS` | 48 | When a site fails, how old its cached results can be and still be shown |
+| `ALERT_AFTER_FAILURES` | 3 | Alert the admins after this many failures in a row (403/429 alert immediately) |
+| `CACHE_TTL_HOURS` | 6 | How long a site's results for a keyword are reused for everyone |
+| `SCRAPER_USER_AGENT` | `TopJobsTelegramBot/1.0 (+https://t.me/TopJobsSearch_Bot)` | How the bot identifies itself to the sites |
 | `RATE_LIMIT_COOLDOWN_SECS` | 10 | Minimum gap between one user's searches |
 | `RATE_LIMIT_SEARCHES_PER_HOUR` | 20 | Searches per user per rolling hour |
-| `RATE_LIMIT_USER_RUNS_PER_DAY` | 5 | **New Actor runs** a user can trigger per rolling 24h |
-| `RATE_LIMIT_GLOBAL_RUNS_PER_DAY` | 200 | Hard cap on Actor runs for the whole bot per rolling 24h |
-| `ADMIN_USER_IDS` | empty | Comma-separated Telegram IDs exempt from the per-user limits |
-| `APIFY_FETCH_FULL_DETAILS` | true | `true`: location, job type and description data. `false`: faster compact rows |
+| `RATE_LIMIT_USER_FETCHES_PER_DAY` | 30 | Searches per user per 24h that have to contact the sites |
+| `RATE_LIMIT_GLOBAL_FETCHES_PER_DAY` | 500 | Hard cap on site requests per 24h, across all users |
+| `ADMIN_USER_IDS` | empty | Telegram IDs that skip the per-user limits **and get site alerts**. Each admin must press `/start` in the bot once |
 | `DATABASE_PATH` | `jobbot.sqlite3` | SQLite file |
 | `LOG_LEVEL` | INFO | Logging level |
 
 Setting any `RATE_LIMIT_*` value to `0` disables that limit.
 
-## Cost controls
+## Being a good guest on the job sites
 
-- **Memory:** runs start at 256 MB, or at the Actor's declared minimum if that is higher. The bot
-  reads the minimum from the Actor's latest build. If a run fails because it ran out of memory, the
-  bot retries once with the fallback memory. Memory and run status are logged for every run.
-- **Per-run limits:** `maxResults` (in the Actor input) and `max_items` (on the run) are both set
-  to 10. The dataset read is capped at 10, and `APIFY_TIMEOUT_SECS` applies to every run.
-- **Caching:** results are cached per keyword in SQLite for `CACHE_TTL_HOURS` and shared by all
-  users. Each user still has their own sent history.
-- **Shared runs:** if a keyword is already being fetched, later searches wait for that run instead
-  of starting another.
-- **Show More:** reads from SQLite only and never starts an Actor run.
-- **Rate limits:** only searches that would start a new Actor run count toward the run budgets.
-  Cache hits are free. The global daily cap limits the worst-case daily cost: roughly
-  `200 × (start fee + 10 results)`.
+- **Cache:** results are cached per site and keyword for 6 hours and shared by all users.
+- **Shared requests:** if a keyword is already being fetched, later searches wait for that request
+  instead of sending another.
+- **Request gap:** at most one request every 2 seconds per site, however many users search at once.
+- **Honest User-Agent:** the bot identifies itself and doesn't pretend to be a browser.
+- **Fetch budgets:** per-user and global limits cap how often the sites get contacted. Cache hits
+  and Show More are free.
+- **No detail pages:** one search request per site, and nothing more.
 
-This Actor is billed per event: a start fee plus a fee per result. Apify platform compute isn't
-billed separately, so the result limits and the run caps save more money than low memory does.
+## When a site has problems
+
+| What happens | What the bot does |
+|---|---|
+| Timeout, connection error, 5xx | Retries twice, waiting 2s and then 4s |
+| 4xx other than 403/429 | Gives up right away; retrying won't help |
+| **403 or 429** (blocked or rate-limited) | Never retries. Pauses all requests to that site for 30 min, or longer if the site's `Retry-After` asks |
+| Any failure | Shows that site's cached results up to 48h old, marked "may be outdated" |
+| 3 failures in a row, or any 403/429 | Sends **one** alert to `ADMIN_USER_IDS`, and one more when the site works again |
+
+The bot doesn't rotate IP addresses or proxies to get around a block. A block means the site is
+refusing the bot, so the bot backs off and tells you.
 
 ## Abuse protection
 
-- One active search per user. Extra messages get "please wait".
-- A cooldown, an hourly search cap and a daily cap on new Actor runs, all per user and stored in
-  SQLite so they survive restarts.
-- A global daily cap on Actor runs that applies to admins too.
-- Limit notices go out at most once every 5 seconds per user, so a flooding user can't make the
-  bot flood Telegram back.
+- One active search per user.
+- A cooldown, an hourly search cap and a daily fetch cap, all per user and stored in SQLite.
+- A global daily fetch cap.
+- Limit notices go out at most once every 5 seconds per user.
 - Show More buttons are one-time, tied to their user, and expire after 24 hours. A new search
   retires older buttons.
 
 ## Deployment
 
-The bot uses long polling, so it doesn't need a public URL. Run **exactly one instance per bot
-token**. Two instances polling the same token conflict, and each would keep its own in-flight run
-tracking.
+The bot uses long polling and needs no public URL. Run **exactly one instance per bot token**.
 
 ### Render (free) + UptimeRobot
 
-Render's free plan doesn't offer background workers, so the bot runs as a free **web service**.
-When the `PORT` environment variable is set (Render sets it), the bot also serves `GET`/`HEAD`
-requests on `/health`. UptimeRobot pings that URL every 5 minutes, which keeps the instance from
-sleeping after 15 idle minutes.
+The bot runs as a free Render **web service** using the [`Dockerfile`](Dockerfile). When `PORT`
+is set, which Render does, the bot also answers `GET`/`HEAD` on `/health`. UptimeRobot pings that
+URL every 5 minutes so the free instance never goes to sleep.
 
-1. Push this project to a GitHub repo. `.env` is git-ignored and must stay out of the repo.
-2. In Render, go to **New → Blueprint**, pick the repo, and Render reads [`render.yaml`](render.yaml).
-   Enter `TELEGRAM_BOT_TOKEN`, `APIFY_API_TOKEN` and, if you want, `ADMIN_USER_IDS` when Render asks
-   for them.
-3. Once it's deployed, open `https://<your-service>.onrender.com/health`. It should say `ok`.
-4. In UptimeRobot, add an **HTTP(s)** monitor for that `/health` URL with a 5-minute interval.
+1. Push to GitHub. `.env` is git-ignored.
+2. In Render: **New → Web Service** → pick the repo → Language **Docker** → Instance **Free** →
+   Health Check Path `/health`.
+3. Add the environment variables: `TELEGRAM_BOT_TOKEN`, plus any from the table above that you
+   want to change.
+4. Once it's deployed, `https://<service>.onrender.com/health` should return `ok`.
+5. In UptimeRobot, add an **HTTP(s)** monitor for that URL with a 5-minute interval.
 
-Free-plan limits:
-- **No persistent disk.** The SQLite file (cache, sent history, rate-limit counters) is wiped on
-  every redeploy or restart. The bot keeps working, but users may see jobs again and the counters
-  reset. For lasting data, use a paid instance with a disk mounted at `DATABASE_PATH`.
-- **750 free instance hours a month** per workspace. One always-on service uses about 744, so
-  don't run a second free service in the same workspace.
-- During a deploy, the old and new instances overlap for a moment. Telegram may then log a short
-  `Conflict` error, which clears on its own.
+**Free-plan limits:**
+- **No persistent disk.** The SQLite file is wiped on every redeploy or restart, so the cache, sent
+  history and rate-limit counters reset.
+- **750 free instance hours a month.** One always-on service uses about 744.
+- **Short `Conflict` errors during deploys** are normal while the old and new instances overlap.
 
-### Linux VPS with systemd
+### CI/CD pipeline (push → tests → Render deploy)
 
-```bash
-sudo useradd --system --create-home --home-dir /opt/jobbot jobbot
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push and pull request:
+
+| Job | What it checks |
+|---|---|
+| Tests (Python 3.11, 3.12) | Installs dependencies, byte-compiles every module, runs `pytest` |
+| Docker image | Builds the same image Render builds, imports the app inside it, and checks that a missing token gives a clean exit code 2 instead of a crash |
+
+Render deploys **only `main`, and only when every check passes**:
+
+```
+push to main ──► GitHub Actions ──► all green? ──► Render deploys
+                                 └─► any red?  ──► nothing deploys; the live bot keeps running
+push to a branch / open a PR ──► same checks, never deploys
 ```
 
-Copy the project to `/opt/jobbot`, create the venv and `.env` as described above, then create
-`/etc/systemd/system/jobbot.service`:
+One-time setup in the Render dashboard (needed because the service wasn't created from the Blueprint):
+**your service → Settings → Build & Deploy → Auto-Deploy → "After CI Checks Pass"**, with the
+branch set to `main`. Render skips a commit that has no checks, so leave the workflow enabled.
 
-```ini
-[Unit]
-Description=TopJobs Telegram bot
-After=network-online.target
-
-[Service]
-User=jobbot
-WorkingDirectory=/opt/jobbot
-ExecStart=/opt/jobbot/.venv/bin/python -m jobbot
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
+Day-to-day:
 
 ```bash
-sudo systemctl daemon-reload && sudo systemctl enable --now jobbot
+git switch -c feat/my-change
 ```
 
 ```bash
-journalctl -u jobbot -f
+git push -u origin feat/my-change
 ```
+
+Open a pull request into `main`, wait for green checks, then merge. Merging is what deploys.
 
 ### Docker
 
@@ -225,14 +227,10 @@ docker build -t jobbot .
 docker run -d --name jobbot --restart unless-stopped --env-file .env -v jobbot-data:/data jobbot
 ```
 
-The SQLite database lives in the `jobbot-data` volume, so the cache, sent history and rate limits
-survive restarts and redeploys.
-
 ## Security
 
-- Tokens are read from `.env` and never hardcoded.
-- The log formatter redacts both tokens and anything shaped like a bot or Apify token. The `httpx`
-  request logs, which include the bot token in the URL, are turned down to WARNING.
+- The bot token is read from `.env` or the host's environment and never hardcoded.
+- The log formatter redacts the token. `httpx` request logs, which include the bot token in the
+  URL, are turned down to WARNING.
 - All scraped text is HTML-escaped before it is sent.
-- If a token ever leaks (for example, pasted into a chat or committed), revoke it: use `/revoke`
-  in @BotFather, or regenerate the Apify token in Apify Console.
+- If the token ever leaks, revoke it with `/revoke` in @BotFather.

@@ -1,0 +1,74 @@
+# CI for every push and pull request.
+#
+# Deploys: Render's Auto-Deploy is set to "After CI Checks Pass", so a push to
+# `main` deploys only when every job below succeeds. Pushes to other branches
+# and pull requests run the same checks but never deploy.
+name: CI
+
+on:
+  push:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Byte-compile every module
+        # Catches syntax errors even in files no test imports.
+        run: python -m compileall -q jobbot tests
+
+      - name: Run tests
+        run: pytest -q
+
+  docker:
+    name: Docker image builds and starts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build image
+        run: docker build -t jobbot:ci .
+
+      - name: Import the app inside the image
+        # Same image Render builds; proves dependencies install and the code loads.
+        run: docker run --rm jobbot:ci python -c "import jobbot.__main__, jobbot.bot; print('image ok')"
+
+      - name: Config check without secrets fails cleanly
+        # No TELEGRAM_BOT_TOKEN in CI: the bot must exit with code 2 and a clear message, not crash.
+        run: |
+          set +e
+          docker run --rm jobbot:ci > out.txt 2>&1
+          code=$?
+          cat out.txt
+          test "$code" -eq 2 && grep -q "Missing required setting TELEGRAM_BOT_TOKEN" out.txt

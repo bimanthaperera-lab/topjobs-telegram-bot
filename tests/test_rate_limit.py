@@ -1,13 +1,12 @@
 import pytest
 
-from jobbot.job_service import JobSearchService
 from jobbot.rate_limit import (
     DAY,
     HOUR,
     REASON_COOLDOWN,
-    REASON_GLOBAL_RUNS,
+    REASON_GLOBAL_FETCHES,
     REASON_HOURLY,
-    REASON_USER_RUNS,
+    REASON_USER_FETCHES,
     RateLimitConfig,
     RateLimiter,
     RateLimitExceeded,
@@ -15,11 +14,11 @@ from jobbot.rate_limit import (
     parse_admin_ids,
 )
 
-from .conftest import make_jobs
+from .conftest import FakeSource, make_jobs, make_service
 
 
 def limiter(storage, **kw):
-    cfg = dict(cooldown_secs=0, searches_per_hour=0, user_runs_per_day=0, global_runs_per_day=0)
+    cfg = dict(cooldown_secs=0, searches_per_hour=0, user_fetches_per_day=0, global_fetches_per_day=0)
     cfg.update(kw)
     return RateLimiter(storage, RateLimitConfig(**cfg))
 
@@ -48,42 +47,42 @@ def test_hourly_sliding_window(storage, clock):
     assert rl.check_search(1).allowed  # oldest event slid out
 
 
-def test_user_run_budget(storage, clock):
-    rl = limiter(storage, user_runs_per_day=2)
-    rl.record_actor_run(1)
-    rl.record_actor_run(1)
-    d = rl.check_actor_run(1)
-    assert not d.allowed and d.reason == REASON_USER_RUNS
-    assert rl.check_actor_run(2).allowed
+def test_user_fetch_budget(storage, clock):
+    rl = limiter(storage, user_fetches_per_day=2)
+    rl.record_fetch(1)
+    rl.record_fetch(1)
+    d = rl.check_fetch(1)
+    assert not d.allowed and d.reason == REASON_USER_FETCHES
+    assert rl.check_fetch(2).allowed
     clock.advance(DAY)
-    assert rl.check_actor_run(1).allowed
+    assert rl.check_fetch(1).allowed
 
 
-def test_global_run_budget_applies_to_everyone(storage):
-    rl = limiter(storage, global_runs_per_day=2, admin_user_ids=frozenset({99}))
-    rl.record_actor_run(1)
-    rl.record_actor_run(2)
-    assert rl.check_actor_run(3).reason == REASON_GLOBAL_RUNS
-    assert rl.check_actor_run(99).reason == REASON_GLOBAL_RUNS
+def test_global_fetch_budget_applies_to_everyone(storage):
+    rl = limiter(storage, global_fetches_per_day=2, admin_user_ids=frozenset({99}))
+    rl.record_fetch(1)
+    rl.record_fetch(2)
+    assert rl.check_fetch(3).reason == REASON_GLOBAL_FETCHES
+    assert rl.check_fetch(99).reason == REASON_GLOBAL_FETCHES
 
 
 def test_admin_skips_per_user_limits(storage):
-    rl = limiter(storage, cooldown_secs=60, searches_per_hour=1, user_runs_per_day=1,
+    rl = limiter(storage, cooldown_secs=60, searches_per_hour=1, user_fetches_per_day=1,
                  admin_user_ids=frozenset({99}))
     for _ in range(5):
         assert rl.check_search(99).allowed
         rl.record_search(99)
-        assert rl.check_actor_run(99).allowed
-        rl.record_actor_run(99)
+        assert rl.check_fetch(99).allowed
+        rl.record_fetch(99)
 
 
 def test_zero_disables_limits(storage):
     rl = limiter(storage)
     for _ in range(50):
         rl.record_search(1)
-        rl.record_actor_run(1)
+        rl.record_fetch(1)
     assert rl.check_search(1).allowed
-    assert rl.check_actor_run(1).allowed
+    assert rl.check_fetch(1).allowed
 
 
 def test_purge_removes_old_events(storage, clock):
@@ -94,40 +93,54 @@ def test_purge_removes_old_events(storage, clock):
     assert rl.purge() == 1
 
 
-class CountingFetch:
-    def __init__(self):
-        self.calls = 0
-
-    async def __call__(self, keyword, limit):
-        self.calls += 1
-        return make_jobs(limit, prefix=keyword)
+def keyword_jobs(name):
+    return lambda keyword, call: make_jobs(10, prefix=f"{name}-{keyword}", source=name)
 
 
-async def test_cache_hits_do_not_use_run_budget(storage):
-    fetch = CountingFetch()
-    rl = limiter(storage, user_runs_per_day=1)
-    service = JobSearchService(storage, fetch, cache_ttl_secs=3600, sorted_newest_first=False, limiter=rl)
+async def test_cache_hits_do_not_use_fetch_budget(storage):
+    source = FakeSource(jobs=keyword_jobs("Site A"))
+    rl = limiter(storage, user_fetches_per_day=1)
+    service = make_service(storage, source, limiter=rl)
 
-    await service.search(1, "accountant")  # uses the one run
+    await service.search(1, "accountant")  # uses the one fetch
     await service.search(1, "accountant")  # cache hit, allowed
     await service.search(1, "accountant")
-    assert fetch.calls == 1
+    assert source.calls == 1
 
     with pytest.raises(RateLimitExceeded) as exc:
-        await service.search(1, "driver")  # would need a new run
-    assert exc.value.decision.reason == REASON_USER_RUNS
-    assert fetch.calls == 1
+        await service.search(1, "driver")  # would need a new fetch
+    assert exc.value.decision.reason == REASON_USER_FETCHES
+    assert source.calls == 1
+
+
+async def test_one_search_counts_once_for_all_sites(storage):
+    a, b = FakeSource("Site A"), FakeSource("Site B")
+    rl = limiter(storage, user_fetches_per_day=1)
+    service = make_service(storage, a, b, limiter=rl)
+    await service.search(1, "accountant")  # contacts both sites, one budget unit
+    assert a.calls == 1 and b.calls == 1
 
 
 async def test_blocked_user_can_still_use_keyword_cached_by_others(storage):
-    fetch = CountingFetch()
-    rl = limiter(storage, user_runs_per_day=1)
-    service = JobSearchService(storage, fetch, cache_ttl_secs=3600, sorted_newest_first=False, limiter=rl)
+    source = FakeSource(jobs=keyword_jobs("Site A"))
+    rl = limiter(storage, user_fetches_per_day=1)
+    service = make_service(storage, source, limiter=rl)
     await service.search(1, "accountant")
     await service.search(2, "driver")
-    result = await service.search(1, "driver")  # user 1 is out of runs but driver is cached
+    result = await service.search(1, "driver")  # user 1 is out of fetches but driver is cached
     assert result.first_page
-    assert fetch.calls == 2
+    assert source.calls == 2
+
+
+async def test_blocked_user_gets_partially_cached_results(storage, clock):
+    a = FakeSource("Site A")
+    b = FakeSource("Site B", fail=True)
+    rl = limiter(storage, user_fetches_per_day=1)
+    service = make_service(storage, a, b, limiter=rl)
+    await service.search(1, "accountant")  # A cached, B failed (not cached)
+    result = await service.search(1, "accountant")  # B needs a fetch but budget is spent
+    assert result.first_page  # served from A's cache instead of refusing
+    assert b.calls == 1
 
 
 def test_parse_admin_ids():

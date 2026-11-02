@@ -5,19 +5,30 @@ from __future__ import annotations
 import logging
 import sys
 
-from apify_client import ApifyClientAsync
 from telegram import Update
 
-from . import actor_mapping
-from .apify_service import ApifyJobFetcher
 from .bot import build_application
-from .config import ConfigError, load_settings
+from .config import ConfigError, Settings, load_settings
 from .job_service import SESSION_MAX_AGE_SECS, JobSearchService
 from .logging_setup import setup_logging
 from .rate_limit import RateLimiter
+from .site_health import AdminNotifier, SiteHealth
+from .sources import JobSource
+from .sources.http import PoliteHttpClient, build_http_client
+from .sources.topjobs import TopJobsSource
+from .sources.xpressjobs import XpressJobsSource
 from .storage import Storage
 
 log = logging.getLogger("jobbot")
+
+
+def build_sources(settings: Settings, http: PoliteHttpClient) -> list[JobSource]:
+    sources: list[JobSource] = []
+    if settings.topjobs_enabled:
+        sources.append(TopJobsSource(http))
+    if settings.xpressjobs_enabled:
+        sources.append(XpressJobsSource(http))
+    return sources
 
 
 def main() -> int:
@@ -34,28 +45,34 @@ def main() -> int:
     if purged:
         log.info("Removed %d expired Show More sessions", purged)
 
-    fetcher = ApifyJobFetcher(
-        ApifyClientAsync(token=settings.apify_api_token),
-        settings.apify_actor_id,
-        memory_mb=settings.apify_memory_mb,
-        fallback_memory_mb=settings.apify_fallback_memory_mb,
-        timeout_secs=settings.apify_timeout_secs,
-        fetch_full_details=settings.apify_fetch_full_details,
+    http = PoliteHttpClient(
+        build_http_client(settings.http_timeout_secs, settings.scraper_user_agent),
+        settings.scrape_min_interval_secs,
+        retries=settings.http_retries,
+        block_pause_secs=settings.site_backoff_minutes * 60,
     )
+    sources = build_sources(settings, http)
     limiter = RateLimiter(storage, settings.rate_limit)
     limiter.purge()
+    notifier = AdminNotifier(settings.rate_limit.admin_user_ids)
     service = JobSearchService(
         storage,
-        fetcher.fetch,
+        sources,
         cache_ttl_secs=settings.cache_ttl_secs,
-        sorted_newest_first=actor_mapping.ACTOR_SORTS_NEWEST,
         limiter=limiter,
+        stale_max_secs=settings.stale_cache_max_hours * 3600,
+        health=SiteHealth(settings.alert_after_failures),
+        notify=notifier,
     )
 
-    app = build_application(settings.telegram_bot_token, service, limiter, settings.health_port)
-    log.info("Bot starting (actor=%s, memory=%dMB, timeout=%ds, cache=%.1fh)",
-             settings.apify_actor_id, settings.apify_memory_mb,
-             settings.apify_timeout_secs, settings.cache_ttl_hours)
+    app = build_application(
+        settings.telegram_bot_token, service, limiter, settings.health_port, shutdown_hooks=[http.aclose]
+    )
+    notifier.bind(app.bot)
+    if not settings.rate_limit.admin_user_ids:
+        log.warning("ADMIN_USER_IDS is empty; site alerts will only be logged.")
+    log.info("Bot starting (sites=%s, cache=%.1fh, min interval=%.1fs)",
+             ", ".join(s.name for s in sources), settings.cache_ttl_hours, settings.scrape_min_interval_secs)
     try:
         app.run_polling(allowed_updates=[Update.MESSAGE, Update.CALLBACK_QUERY])
     finally:

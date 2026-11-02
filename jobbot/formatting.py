@@ -35,10 +35,13 @@ def format_job(job: Job, index: int | None = None) -> str:
         lines.append(f"📍 {escape(truncate(job.location, _FIELD_MAX))}")
     if job.posted:
         lines.append(f"📅 Posted: {escape(truncate(job.posted, _FIELD_MAX))}")
+    if job.closing:
+        lines.append(f"⏳ Closes: {escape(truncate(job.closing, _FIELD_MAX))}")
     if job.description:
         lines.append(f"📝 {escape(truncate(job.description, DESCRIPTION_MAX))}")
     href = escape(job.url, quote=True)
-    link = f'🔗 <a href="{href}">View job</a>' if len(href) <= _URL_MAX else None
+    label = f"View on {escape(job.source)}" if job.source else "View job"
+    link = f'🔗 <a href="{href}">{label}</a>' if len(href) <= _URL_MAX else None
     if link:
         lines.append(link)
     block = "\n".join(lines)

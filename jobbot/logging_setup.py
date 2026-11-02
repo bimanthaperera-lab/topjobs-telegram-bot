@@ -1,4 +1,4 @@
-"""Logging that never prints the bot or Apify tokens."""
+"""Logging that never prints the bot token."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ import logging
 import re
 
 _BOT_TOKEN_PATTERN = re.compile(r"\d{6,}:[A-Za-z0-9_-]{30,}")
-_APIFY_TOKEN_PATTERN = re.compile(r"apify_api_[A-Za-z0-9]+")
 REDACTED = "***"
 
 
@@ -18,8 +17,7 @@ class RedactingFormatter(logging.Formatter):
     def redact(self, text: str) -> str:
         for secret in self._secrets:
             text = text.replace(secret, REDACTED)
-        text = _BOT_TOKEN_PATTERN.sub(REDACTED, text)
-        return _APIFY_TOKEN_PATTERN.sub(REDACTED, text)
+        return _BOT_TOKEN_PATTERN.sub(REDACTED, text)
 
     def format(self, record: logging.LogRecord) -> str:
         # Covers the message, args and any traceback text.

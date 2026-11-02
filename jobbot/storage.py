@@ -27,13 +27,14 @@ CREATE TABLE IF NOT EXISTS sent_jobs (
     sent_at REAL NOT NULL,
     PRIMARY KEY (user_id, url)
 );
-CREATE TABLE IF NOT EXISTS last_sent (
+CREATE TABLE IF NOT EXISTS last_sent_by_source (
     user_id    INTEGER NOT NULL,
     keyword    TEXT NOT NULL,
+    source     TEXT NOT NULL,
     url        TEXT NOT NULL,
     title      TEXT NOT NULL,
     updated_at REAL NOT NULL,
-    PRIMARY KEY (user_id, keyword)
+    PRIMARY KEY (user_id, keyword, source)
 );
 CREATE TABLE IF NOT EXISTS more_sessions (
     session_id TEXT PRIMARY KEY,
@@ -88,7 +89,7 @@ class Storage:
         with self._lock:
             self._conn.close()
 
-    # --- keyword cache (shared by all users) -------------------------------
+    # --- result cache (shared by all users; key is "<site>|<keyword>") ------
 
     def get_cached_jobs(self, keyword: str, ttl_secs: float) -> CachedJobs | None:
         """Return the cached result set if it is younger than ttl_secs."""
@@ -123,20 +124,23 @@ class Storage:
                 [(user_id, j.url, now) for j in jobs],
             )
 
-    def get_last_sent(self, user_id: int, keyword: str) -> LastSent | None:
+    def get_last_sent_map(self, user_id: int, keyword: str) -> dict[str | None, LastSent]:
+        """Most recent job sent to this user for this keyword, per site."""
         with self._lock:
-            row = self._conn.execute(
-                "SELECT url, title FROM last_sent WHERE user_id = ? AND keyword = ?", (user_id, keyword)
-            ).fetchone()
-        return LastSent(url=row["url"], title=row["title"]) if row else None
+            rows = self._conn.execute(
+                "SELECT source, url, title FROM last_sent_by_source WHERE user_id = ? AND keyword = ?",
+                (user_id, keyword),
+            ).fetchall()
+        return {(r["source"] or None): LastSent(url=r["url"], title=r["title"]) for r in rows}
 
     def set_last_sent(self, user_id: int, keyword: str, job: Job) -> None:
         with self._lock:
             self._conn.execute(
-                "INSERT INTO last_sent (user_id, keyword, url, title, updated_at) VALUES (?, ?, ?, ?, ?) "
-                "ON CONFLICT(user_id, keyword) DO UPDATE SET url = excluded.url, title = excluded.title, "
+                "INSERT INTO last_sent_by_source (user_id, keyword, source, url, title, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(user_id, keyword, source) DO UPDATE SET url = excluded.url, title = excluded.title, "
                 "updated_at = excluded.updated_at",
-                (user_id, keyword, job.url, job.title, self._clock()),
+                (user_id, keyword, job.source or "", job.url, job.title, self._clock()),
             )
 
     # --- Show More sessions -------------------------------------------------
