@@ -1,0 +1,60 @@
+# Posts new software engineering jobs from TopJobs.lk to a Telegram channel,
+# three times a day. See jobbot/notify.py.
+#
+# Needs two repository secrets (Settings -> Secrets and variables -> Actions):
+#   TELEGRAM_BOT_TOKEN  the bot's token
+#   NOTIFY_CHAT_ID      the channel: "@channelname" or its numeric id (-100...)
+# The bot must be an admin of the channel with permission to post messages.
+name: Job alerts
+
+on:
+  schedule:
+    # 09:00, 13:00 and 18:00 Sri Lanka time (UTC+5:30). GitHub may start runs a few minutes late.
+    - cron: "30 3,7,12 * * *"
+  workflow_dispatch: # "Run workflow" button for testing
+
+permissions:
+  contents: read
+
+concurrency:
+  group: job-alerts
+  cancel-in-progress: false # never let two runs post the same jobs
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Restore the list of jobs already posted
+        uses: actions/cache/restore@v4
+        with:
+          path: .notify-state
+          # Each run saves under its own key; restore-keys picks the newest one.
+          key: notify-state-${{ github.run_id }}
+          restore-keys: notify-state-
+
+      - name: Post new software engineering jobs
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          NOTIFY_CHAT_ID: ${{ secrets.NOTIFY_CHAT_ID }}
+          NOTIFY_STATE_FILE: .notify-state/seen.json
+        run: python -m jobbot.notify
+
+      - name: Save the list of jobs already posted
+        # Also after a partial failure, so jobs that did get posted are never posted twice.
+        if: always() && hashFiles('.notify-state/seen.json') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: .notify-state
+          key: notify-state-${{ github.run_id }}

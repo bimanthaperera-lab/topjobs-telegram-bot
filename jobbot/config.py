@@ -20,6 +20,9 @@ class ConfigError(RuntimeError):
 class Settings:
     telegram_bot_token: str
     topjobs_enabled: bool = True
+    # TopJobs category to search within ("SDQ" = IT software); empty = all jobs by keyword.
+    topjobs_category: str | None = "SDQ"
+    send_job_images: bool = True
     xpressjobs_enabled: bool = False  # needs XpressJobs' permission; see sources/xpressjobs.py
     http_timeout_secs: int = 20
     scrape_min_interval_secs: float = 2.0
@@ -100,6 +103,8 @@ def load_settings(env_file: str | None = ".env") -> Settings:
     return Settings(
         telegram_bot_token=_required("TELEGRAM_BOT_TOKEN"),
         topjobs_enabled=topjobs_enabled,
+        topjobs_category=_category(),
+        send_job_images=_bool("SEND_JOB_IMAGES", True),
         xpressjobs_enabled=xpressjobs_enabled,
         http_timeout_secs=_int("HTTP_TIMEOUT_SECS", 20, minimum=5),
         scrape_min_interval_secs=_float("SCRAPE_MIN_INTERVAL_SECS", 2.0),
@@ -151,6 +156,13 @@ def parse_admin_ids_lenient(raw: str | None) -> tuple[frozenset[int], list[str]]
         else:
             problems.append(f"ADMIN_USER_IDS entry {position} {_admin_id_problem(entry)}; it was ignored.")
     return frozenset(ids), problems
+
+
+def _category() -> str | None:
+    raw = os.getenv("TOPJOBS_CATEGORY")
+    if raw is None:
+        return "SDQ"
+    return raw.strip().upper() or None  # set but empty: search all jobs by keyword
 
 
 def _admin_ids(warnings: list[str]) -> frozenset[int]:

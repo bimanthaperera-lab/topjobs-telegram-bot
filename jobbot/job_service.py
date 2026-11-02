@@ -144,8 +144,15 @@ class JobSearchService:
 
     @staticmethod
     def _cache_key(source: JobSource, keyword: str) -> str:
-        # Version prefix: entries cached before ranking existed are ignored.
-        return f"v2|{source.name}|{keyword}"
+        # A keyword-independent source (a whole category) is cached once for every keyword.
+        # Version prefix: entries cached in an older format are ignored.
+        part = "*" if getattr(source, "keyword_independent", False) else keyword
+        return f"v3|{source.name}|{part}"
+
+    def _prepare(self, jobs: list[Job], keyword: str) -> list[Job]:
+        """Rank a site's raw (cached) list for this keyword, best first, and cap it."""
+        ranked = rank_jobs(jobs, keyword) if self._rank_results else jobs
+        return ranked[: self._jobs_per_source]
 
     async def get_jobs(self, keyword: str, user_id: int | None = None) -> list[Job]:
         return (await self._collect(keyword, user_id)).jobs
@@ -203,11 +210,11 @@ class JobSearchService:
         answered = bool(cached)  # some site gave a usable answer, even an empty one
         for source in self._sources:
             if source.name in cached:
-                jobs.extend(cached[source.name])
+                jobs.extend(self._prepare(cached[source.name], keyword))
                 continue
             outcome = fetched.get(source.name)
             if outcome is not None and not isinstance(outcome, BaseException):
-                jobs.extend(outcome)
+                jobs.extend(self._prepare(outcome, keyword))
                 answered = True
                 continue
             if isinstance(outcome, BaseException):
@@ -217,7 +224,7 @@ class JobSearchService:
             # Failed, or skipped because the fetch budget is spent: fall back to older results.
             older = self._storage.get_cached_jobs(self._cache_key(source, keyword), self._stale_max_secs)
             if older is not None:
-                jobs.extend(older.jobs)
+                jobs.extend(self._prepare(older.jobs, keyword))
                 stale.append(source.name)
             elif outcome is not None:
                 failed.append(source.name)
@@ -232,14 +239,12 @@ class JobSearchService:
         except Exception as exc:
             self._report(self._health.record_failure(source.name, exc) if self._health else None)
             raise
-        # Rank before trimming, so a good match far down the site's list isn't cut off.
-        ranked = rank_jobs(found, keyword) if self._rank_results else found
-        jobs = ranked[: self._jobs_per_source]
-        log.info("%s returned %d jobs for %r; %d relevant, caching %d",
-                 source.name, len(found), keyword, len(ranked), len(jobs))
-        self._storage.save_cached_jobs(key, jobs)
+        # Cache the raw list: ranking happens per keyword at search time, so a good match
+        # far down the list isn't lost, and a category list can serve every keyword.
+        log.info("%s returned %d jobs for %r", source.name, len(found), keyword)
+        self._storage.save_cached_jobs(key, found)
         self._report(self._health.record_success(source.name) if self._health else None)
-        return jobs
+        return found
 
     def set_notifier(self, notify: Notify | None) -> None:
         self._notify = notify

@@ -35,3 +35,8 @@ class JobSource(Protocol):
     sorted_newest_first: bool
 
     async def fetch(self, keyword: str, limit: int) -> list[Job]: ...
+
+    # Optional extras (read with getattr):
+    #   keyword_independent: bool  - fetch() returns the same list for every keyword,
+    #                                so one cached fetch serves all keywords.
+    #   async fetch_image(job_url) -> bytes | None  - the job's ad image.

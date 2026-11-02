@@ -67,12 +67,12 @@ class PoliteHttpClient:
         """Seconds left on a host's pause (0 if not paused)."""
         return max(0.0, self._paused_until.get(host, 0.0) - self._clock())
 
-    async def _send_once(self, host: str, url: str, **kwargs) -> httpx.Response:
+    async def _send_once(self, host: str, url: str, min_interval: float, **kwargs) -> httpx.Response:
         lock = self._locks.setdefault(host, asyncio.Lock())
         async with lock:
             last = self._last_request.get(host)
             if last is not None:
-                wait = last + self._min_interval - self._clock()
+                wait = last + min_interval - self._clock()
                 if wait > 0:
                     await self._sleep(wait)
             try:
@@ -80,8 +80,14 @@ class PoliteHttpClient:
             finally:
                 self._last_request[host] = self._clock()
 
-    async def get(self, url: str, **kwargs) -> httpx.Response:
+    async def get(self, url: str, *, min_interval: float | None = None, **kwargs) -> httpx.Response:
+        """GET with spacing, retries and block handling.
+
+        min_interval overrides the gap before this request: job pages and their
+        images (like a browser loading a page) use a shorter one than searches.
+        """
         host = urlsplit(url).hostname or ""
+        gap = self._min_interval if min_interval is None else min_interval
         last_error = ""
         for attempt in range(self._retries + 1):
             remaining = self.paused_for(host)
@@ -89,7 +95,7 @@ class PoliteHttpClient:
                 raise SitePausedError(host, remaining)
 
             try:
-                response = await self._send_once(host, url, **kwargs)
+                response = await self._send_once(host, url, gap, **kwargs)
             except httpx.HTTPError as exc:
                 last_error = type(exc).__name__
             else:

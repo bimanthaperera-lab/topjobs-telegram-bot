@@ -15,6 +15,10 @@ services:
         sync: false
       - key: TOPJOBS_ENABLED
         value: "true"
+      - key: TOPJOBS_CATEGORY
+        value: "SDQ"
+      - key: SEND_JOB_IMAGES
+        value: "true"
       # Only set to "true" once XpressJobs has given written permission.
       - key: XPRESSJOBS_ENABLED
         value: "false"

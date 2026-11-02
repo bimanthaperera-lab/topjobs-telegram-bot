@@ -53,6 +53,11 @@ CREATE TABLE IF NOT EXISTS rate_events (
 );
 CREATE INDEX IF NOT EXISTS idx_rate_events ON rate_events (kind, user_id, at);
 CREATE INDEX IF NOT EXISTS idx_rate_events_kind_at ON rate_events (kind, at);
+CREATE TABLE IF NOT EXISTS job_photos (
+    url        TEXT PRIMARY KEY,
+    file_id    TEXT,          -- Telegram file_id; NULL = the job has no ad image
+    checked_at REAL NOT NULL
+);
 """
 
 
@@ -196,6 +201,22 @@ class Storage:
         if not rows:
             return None
         return rows[0]["keyword"], _load(rows[0]["jobs_json"])
+
+    # --- job ad images (Telegram file_ids, so each image is downloaded once) ---
+
+    def get_job_photo(self, url: str) -> tuple[str | None, float] | None:
+        """(file_id or None if the job has no image, when that was checked), or None if unknown."""
+        with self._lock:
+            row = self._conn.execute("SELECT file_id, checked_at FROM job_photos WHERE url = ?", (url,)).fetchone()
+        return (row["file_id"], row["checked_at"]) if row else None
+
+    def save_job_photo(self, url: str, file_id: str | None) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO job_photos (url, file_id, checked_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(url) DO UPDATE SET file_id = excluded.file_id, checked_at = excluded.checked_at",
+                (url, file_id, self._clock()),
+            )
 
     # --- rate limiting -------------------------------------------------------
 

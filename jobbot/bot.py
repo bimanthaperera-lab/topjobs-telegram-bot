@@ -21,9 +21,10 @@ from telegram.ext import (
     filters,
 )
 
-from .formatting import format_job
+from .formatting import TELEGRAM_MAX_CAPTION, format_job, telegram_length
 from .health import start_health_server
 from .job_service import PAGE_SIZE, FetchError, JobSearchService
+from .images import JobImages
 from .models import Job
 from .normalize import MAX_KEYWORD_LENGTH, normalize_keyword
 from .rate_limit import (
@@ -47,11 +48,11 @@ CALLBACK_PREFIX = "more:"
 _NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
 MSG_WELCOME = (
-    "👋 Welcome to the Job Search Bot!\n\n"
-    "Send me a job keyword (for example <i>accountant</i> or <i>software engineer</i>) "
-    "and I'll find the latest openings for you."
+    "👋 Welcome! I find <b>IT and software jobs</b> in Sri Lanka.\n\n"
+    "Send me a keyword, for example <i>software engineer</i>, <i>react</i>, <i>qa</i> or "
+    "<i>devops</i>, and I'll show the best matching openings with their job ads."
 )
-MSG_ASK_KEYWORD = "Please send a job keyword, for example <i>accountant</i>."
+MSG_ASK_KEYWORD = "Please send a keyword, for example <i>software engineer</i>."
 MSG_TOO_LONG = f"That keyword is too long. Please keep it under {MAX_KEYWORD_LENGTH} characters."
 MSG_BUSY = "⏳ I'm still working on your previous search. Please wait for it to finish."
 MSG_SEARCHING = "🔎 Searching for <b>{keyword}</b> jobs..."
@@ -174,7 +175,8 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         total = len(result.first_page) + result.more_count
         header = MSG_FOUND.format(count=total, plural="" if total == 1 else "s", keyword=escaped_keyword)
         await _edit_or_send(status, message.chat_id, context, f"{header}\n{notice}" if notice else header)
-        await send_jobs(context.bot, message.chat_id, result.first_page, start_index=1)
+        await send_jobs(context.bot, message.chat_id, result.first_page, start_index=1,
+                        images=context.application.bot_data.get("images"))
         service.record_sent(user.id, keyword, result.first_page)
 
         if result.more_session_id:
@@ -222,7 +224,8 @@ async def show_more(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     try:
         # Numbering continues after the first page.
-        await send_jobs(context.bot, chat_id, jobs, start_index=PAGE_SIZE + 1)
+        await send_jobs(context.bot, chat_id, jobs, start_index=PAGE_SIZE + 1,
+                        images=context.application.bot_data.get("images"))
         service.record_more_sent(user.id, jobs)
     except TelegramError:
         log.exception("Telegram error while sending Show More results")
@@ -240,9 +243,22 @@ def job_keyboard(job: Job) -> InlineKeyboardMarkup | None:
     return InlineKeyboardMarkup([[InlineKeyboardButton(label, url=job.url)]])
 
 
-async def send_job(bot, chat_id: int, job: Job, index: int) -> None:
-    """One job per message, with its link as an inline button under it."""
+async def send_job(bot, chat_id: int, job: Job, index: int, images: JobImages | None = None) -> None:
+    """One job per message: the ad image with the details as its caption when there is one,
+    otherwise a text message; the link is an inline button under it either way."""
     keyboard = job_keyboard(job)
+    photo = await images.photo_for(job) if images is not None else None
+    if photo is not None:
+        caption = format_job(job, index, include_link=keyboard is None)
+        if telegram_length(caption) <= TELEGRAM_MAX_CAPTION:
+            try:
+                sent = await bot.send_photo(chat_id, photo, caption=caption,
+                                            parse_mode=ParseMode.HTML, reply_markup=keyboard)
+                if isinstance(photo, bytes) and getattr(sent, "photo", None):
+                    images.remember(job.url, sent.photo[-1].file_id)  # reuse for every later send
+                return
+            except BadRequest as exc:
+                log.warning("Photo for %s rejected (%s); sending text instead", job.url, exc)
     if keyboard is not None:
         try:
             await bot.send_message(chat_id, format_job(job, index, include_link=False),
@@ -256,9 +272,9 @@ async def send_job(bot, chat_id: int, job: Job, index: int) -> None:
                            parse_mode=ParseMode.HTML, link_preview_options=_NO_PREVIEW)
 
 
-async def send_jobs(bot, chat_id: int, jobs: list[Job], start_index: int) -> None:
+async def send_jobs(bot, chat_id: int, jobs: list[Job], start_index: int, images: JobImages | None = None) -> None:
     for offset, job in enumerate(jobs):
-        await send_job(bot, chat_id, job, start_index + offset)
+        await send_job(bot, chat_id, job, start_index + offset, images)
 
 
 async def _edit_or_send(status, chat_id: int, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
@@ -289,6 +305,7 @@ def build_application(
     limiter: RateLimiter | None = None,
     health_port: int | None = None,
     shutdown_hooks: list[Callable[[], Awaitable[None]]] | None = None,
+    images: JobImages | None = None,
 ) -> Application:
     async def post_init(app: Application) -> None:
         if health_port is not None:
@@ -314,6 +331,7 @@ def build_application(
     )
     app.bot_data["service"] = service
     app.bot_data["limiter"] = limiter
+    app.bot_data["images"] = images
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(show_more, pattern=f"^{CALLBACK_PREFIX}"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search))

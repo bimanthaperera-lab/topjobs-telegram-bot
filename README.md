@@ -1,8 +1,12 @@
-# Sri Lanka Job Search Telegram Bot
+# Sri Lanka IT & Software Jobs Telegram Bot
 
-A Telegram bot that searches **TopJobs.lk** and **XpressJobs** directly. It needs no Apify or any
-other paid scraping service. Each search sends 5 jobs, and a **Thawa Jobs Pennanna (Show More)**
-button sends the next 5.
+A Telegram bot for **IT and software jobs** in Sri Lanka. It reads **TopJobs.lk** (and
+**XpressJobs**, once it's enabled) directly, with no Apify or any other paid scraping service.
+- **Search:** each job arrives as its **ad image**, with the details as the caption and a
+  **🔗 View & Apply** button. Each search sends 5 jobs, and **Thawa Jobs Pennanna (Show More)**
+  sends the rest.
+- **Alerts:** a scheduled GitHub Action posts **new software engineering jobs to a Telegram
+  channel** three times a day. See [Job alerts channel](#job-alerts-channel).
 
 > **XpressJobs is switched off by default.** Its terms of use forbid scraping
 > ("spider, crawl, or scrape") without permission. Set `XPRESSJOBS_ENABLED=true` only after
@@ -12,13 +16,20 @@ button sends the next 5.
 
 1. `/start`: the bot welcomes the user and asks for a keyword.
 2. The user sends a keyword. The bot normalizes it: trim, lowercase, collapse spaces.
-3. The bot searches every enabled site in parallel. It reuses each site's cached results when
-   they're fresh, and only contacts a site when it has to.
-4. It ranks each site's results by relevance to the keyword (see `jobbot/relevance.py`). Then it
-   picks up to 10 jobs this user hasn't seen, alternating between the sites.
-5. The "Searching…" message turns into a header ("🔎 Found 8 new jobs for driver"). Then
-   **each job goes in its own message** with an inline **🔗 View & Apply** button that opens
-   the job page. If Telegram rejects a URL as a button, the bot sends a text link instead.
+3. TopJobs can't combine a keyword with a category, so the bot fetches the whole
+   **IT-Software category** (`TOPJOBS_CATEGORY=SDQ`, about 160 jobs) in **one request**. It
+   caches that list for 6 hours and matches every user's keyword against it locally. "react",
+   "qa" and "software engineer" all share that one fetch.
+4. It ranks the list by relevance to the keyword (see `jobbot/relevance.py`). Then it picks up
+   to 10 jobs this user hasn't seen.
+5. The "Searching…" message turns into a header ("🔎 Found 8 new jobs for react"). Then each
+   job is sent separately:
+   - **As a photo:** the job's ad image (TopJobs publishes the description as an image), with
+     the details as the caption and an inline **🔗 View & Apply** button.
+   - **The image is downloaded only once:** from the job page, after which Telegram's `file_id`
+     is stored and reused for every later send.
+   - **Fallbacks:** a job with no image, or a photo Telegram rejects, becomes a text message
+     with the same button. If Telegram rejects a URL as a button, the job gets a text link.
 6. If more jobs are waiting, a last message says "Showing 5 of 8" and has the **Show More**
    button. The remaining jobs are saved in SQLite behind a short session ID.
 7. **Show More** sends them from SQLite without contacting the sites, then removes the button.
@@ -115,6 +126,8 @@ token redaction.
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | required | Bot token |
 | `TOPJOBS_ENABLED` | true | Search TopJobs.lk |
+| `TOPJOBS_CATEGORY` | `SDQ` | TopJobs category to search within (SDQ = IT software). Set it empty to search all jobs by keyword |
+| `SEND_JOB_IMAGES` | true | Send each job's ad image as a photo |
 | `XPRESSJOBS_ENABLED` | **false** | Search XpressJobs. Turn on only with their permission |
 | `SCRAPE_MIN_INTERVAL_SECS` | 2 | Minimum gap between requests to the same site, across all users |
 | `HTTP_TIMEOUT_SECS` | 20 | Request timeout |
@@ -223,6 +236,36 @@ git push -u origin feat/my-change
 ```
 
 Open a pull request into `main`, wait for green checks, then merge. Merging is what deploys.
+
+### Job alerts channel
+
+[`.github/workflows/job-alerts.yml`](.github/workflows/job-alerts.yml) runs
+[`jobbot/notify.py`](jobbot/notify.py) at **09:00, 13:00 and 18:00 Sri Lanka time**. GitHub may
+start scheduled runs a few minutes late. Each run:
+1. **Fetches** TopJobs' IT-Software category in one request.
+2. **Keeps software engineering titles:** engineer, developer, programmer, DevOps, QA, full
+   stack, tech lead… It drops look-alikes such as sales, network engineer and content developer.
+3. **Posts the new ones to your channel:** a "🆕 N new software engineering jobs" header, then
+   each job as its ad image with the **View & Apply** button. At most 15 per run. If there are
+   more, it posts the newest 15 and says so.
+4. **Remembers what it posted** in `.notify-state/seen.json`. The Actions cache carries it
+   between runs, so nothing is posted twice. The first run only records the current jobs and
+   posts "alerts are on".
+
+**One-time setup:**
+1. **Create the channel:** in Telegram, create a channel (public, e.g. `@lk_software_jobs`, or
+   private).
+2. **Make the bot an admin:** Channel → Administrators → Add Admin → **@TopJobsSearch_Bot**, with
+   **Post Messages** allowed.
+3. **Add the secrets:** GitHub → repo → **Settings → Secrets and variables → Actions → New
+   repository secret**:
+   - `TELEGRAM_BOT_TOKEN`: the bot token.
+   - `NOTIFY_CHAT_ID`: `@yourchannel`, or for a private channel its numeric id (`-100…`).
+4. **Test it:** **Actions → Job alerts → Run workflow**. The channel should get "✅ Software
+   engineering job alerts are on…".
+
+To change the times, edit the `cron` line (in UTC: Sri Lanka time is UTC+5:30). To change which
+titles count, edit `SOFTWARE_TITLE` / `NOT_SOFTWARE` in `jobbot/notify.py`.
 
 ### Docker
 

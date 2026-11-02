@@ -7,6 +7,7 @@ from html import escape
 from .models import Job
 
 TELEGRAM_MAX_MESSAGE = 4096
+TELEGRAM_MAX_CAPTION = 1024  # photo captions are much shorter than messages
 DESCRIPTION_MAX = 200
 _TITLE_MAX = 300
 _FIELD_MAX = 150
