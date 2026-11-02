@@ -1,0 +1,41 @@
+# Render Blueprint: free web service running the bot (long polling) plus a
+# /health endpoint on $PORT that UptimeRobot pings to stop the instance sleeping.
+services:
+  - type: web
+    name: topjobs-telegram-bot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m jobbot
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.10"
+      # Secrets: Render asks for these when the Blueprint is created. Never commit them.
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: APIFY_API_TOKEN
+        sync: false
+      - key: APIFY_ACTOR_ID
+        value: fanndev/topjobs-lk-scraper
+      - key: APIFY_MEMORY_MB
+        value: "256"
+      - key: APIFY_FALLBACK_MEMORY_MB
+        value: "1024"
+      - key: APIFY_TIMEOUT_SECS
+        value: "120"
+      - key: CACHE_TTL_HOURS
+        value: "6"
+      - key: RATE_LIMIT_COOLDOWN_SECS
+        value: "10"
+      - key: RATE_LIMIT_SEARCHES_PER_HOUR
+        value: "20"
+      - key: RATE_LIMIT_USER_RUNS_PER_DAY
+        value: "5"
+      - key: RATE_LIMIT_GLOBAL_RUNS_PER_DAY
+        value: "200"
+      - key: ADMIN_USER_IDS
+        sync: false
+      - key: APIFY_FETCH_FULL_DETAILS
+        value: "true"

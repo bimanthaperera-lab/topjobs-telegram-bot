@@ -1,0 +1,3 @@
+python-telegram-bot>=22.8,<23
+apify-client>=3.4,<4
+python-dotenv>=1.2,<2
