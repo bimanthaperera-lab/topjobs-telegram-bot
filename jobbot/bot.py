@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import functools
 import logging
 import time
 from collections.abc import Awaitable, Callable
 from html import escape
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions, Update
 from telegram.constants import ChatAction, ParseMode
 from telegram.error import BadRequest, TelegramError
 from telegram.ext import (
@@ -21,6 +22,7 @@ from telegram.ext import (
     filters,
 )
 
+from .categories import CATEGORIES, category_by_id
 from .formatting import TELEGRAM_MAX_CAPTION, format_job, telegram_length
 from .health import start_health_server
 from .job_service import PAGE_SIZE, FetchError, JobSearchService
@@ -44,14 +46,18 @@ SHOW_MORE_LABEL = "Thawa Jobs Pennanna (Show More)"
 JOB_BUTTON_LABEL = "🔗 View & Apply"
 MAX_BUTTON_URL = 2000
 CALLBACK_PREFIX = "more:"
+CATEGORY_PREFIX = "cat:"
+CATEGORY_COLUMNS = 2
 
 _NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
 MSG_WELCOME = (
     "👋 Welcome! I find <b>IT and software jobs</b> in Sri Lanka.\n\n"
-    "Send me a keyword, for example <i>software engineer</i>, <i>react</i>, <i>qa</i> or "
-    "<i>devops</i>, and I'll show the best matching openings with their job ads."
+    "Tap a category below, or send me a keyword, for example <i>react</i>, <i>java</i> or "
+    "<i>business analyst</i>, and I'll show the best matching openings with their job ads."
 )
+MSG_PICK_CATEGORY = "Pick a category, or send me any keyword:"
+MSG_UNKNOWN_CATEGORY = "This category is no longer available. Send /categories to see the current list."
 MSG_ASK_KEYWORD = "Please send a keyword, for example <i>software engineer</i>."
 MSG_TOO_LONG = f"That keyword is too long. Please keep it under {MAX_KEYWORD_LENGTH} characters."
 MSG_BUSY = "⏳ I'm still working on your previous search. Please wait for it to finish."
@@ -79,6 +85,10 @@ _LIMIT_MESSAGES = {
     REASON_GLOBAL_FETCHES: "🚦 The bot has reached its daily search limit. Please try again in {wait}.",
 }
 WARN_INTERVAL_SECS = 5
+BOT_COMMANDS = [
+    BotCommand("start", "Welcome message and categories"),
+    BotCommand("categories", "Browse IT job categories"),
+]
 
 
 def _service(context: ContextTypes.DEFAULT_TYPE) -> JobSearchService:
@@ -107,7 +117,7 @@ def _limit_message(decision: Decision) -> str:
     return template.format(wait=format_wait(decision.retry_after_secs))
 
 
-async def _warn(context: ContextTypes.DEFAULT_TYPE, message, user_id: int, text: str) -> None:
+async def _warn(context: ContextTypes.DEFAULT_TYPE, reply, user_id: int, text: str) -> None:
     """Reply to a blocked request, but at most once per WARN_INTERVAL_SECS per user so
     a flooding user cannot make the bot flood Telegram back."""
     warned: dict[int, float] = context.application.bot_data.setdefault("warned_at", {})
@@ -116,14 +126,28 @@ async def _warn(context: ContextTypes.DEFAULT_TYPE, message, user_id: int, text:
         return
     warned[user_id] = now
     try:
-        await message.reply_text(text)
+        await reply(text)
     except TelegramError:
         log.warning("Could not send a rate-limit notice", exc_info=True)
 
 
+def category_keyboard() -> InlineKeyboardMarkup:
+    buttons = [InlineKeyboardButton(c.label, callback_data=f"{CATEGORY_PREFIX}{c.id}") for c in CATEGORIES]
+    return InlineKeyboardMarkup(
+        [buttons[i:i + CATEGORY_COLUMNS] for i in range(0, len(buttons), CATEGORY_COLUMNS)]
+    )
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_message:
-        await update.effective_message.reply_text(MSG_WELCOME, parse_mode=ParseMode.HTML)
+        await update.effective_message.reply_text(
+            MSG_WELCOME, parse_mode=ParseMode.HTML, reply_markup=category_keyboard()
+        )
+
+
+async def categories(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_message:
+        await update.effective_message.reply_text(MSG_PICK_CATEGORY, reply_markup=category_keyboard())
 
 
 async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -139,66 +163,89 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if len(keyword) > MAX_KEYWORD_LENGTH:
         await message.reply_text(MSG_TOO_LONG)
         return
+    await _run_search(context, message.chat_id, user.id, keyword, message.reply_text)
 
+
+async def choose_category(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """A category button: searches the category's title phrases, best kind first. The
+    menu stays, so the user can tap another category later."""
+    query = update.callback_query
+    user = update.effective_user
+    if query is None or user is None:
+        return
+    category = category_by_id((query.data or "")[len(CATEGORY_PREFIX):])
+    if category is None:
+        await query.answer(MSG_UNKNOWN_CATEGORY, show_alert=True)
+        return
+    await query.answer()
+    chat_id = query.message.chat.id if query.message else user.id
+    await _run_search(context, chat_id, user.id, category.label,
+                      functools.partial(context.bot.send_message, chat_id), any_of=category.phrases)
+
+
+async def _run_search(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int, keyword: str,
+                      reply: Callable[..., Awaitable], any_of: tuple[str, ...] = ()) -> None:
+    """Search and send the results. reply(text, **kwargs) sends a message to the chat.
+    any_of: a category's phrases; keyword is then the category's label."""
     # Checks and records below have no await in between, so they are atomic on the event loop.
     active = _active_users(context)
-    if user.id in active:
-        await _warn(context, message, user.id, MSG_BUSY)
+    if user_id in active:
+        await _warn(context, reply, user_id, MSG_BUSY)
         return
     limiter = _limiter(context)
     if limiter is not None:
-        decision = limiter.check_search(user.id)
+        decision = limiter.check_search(user_id)
         if not decision.allowed:
-            await _warn(context, message, user.id, _limit_message(decision))
+            await _warn(context, reply, user_id, _limit_message(decision))
             return
-        limiter.record_search(user.id)
-    active.add(user.id)
+        limiter.record_search(user_id)
+    active.add(user_id)
 
     escaped_keyword = escape(keyword)
     status = None
     try:
-        status = await message.reply_text(
+        status = await reply(
             MSG_SEARCHING.format(keyword=escaped_keyword), parse_mode=ParseMode.HTML
         )
-        await context.bot.send_chat_action(message.chat_id, ChatAction.TYPING)
+        await context.bot.send_chat_action(chat_id, ChatAction.TYPING)
 
         service = _service(context)
-        result = await service.search(user.id, keyword)
+        result = await service.search(user_id, keyword, any_of)
 
         notice = _source_notice(result.failed_sources, result.stale_sources)
         if not result.first_page:
             text = MSG_NO_NEW.format(keyword=escaped_keyword)
-            await _edit_or_send(status, message.chat_id, context, f"{text}\n\n{notice}" if notice else text)
+            await _edit_or_send(status, chat_id, context, f"{text}\n\n{notice}" if notice else text)
             return
 
         # The "Searching..." message becomes the header, then one message per job.
         total = len(result.first_page) + result.more_count
         header = MSG_FOUND.format(count=total, plural="" if total == 1 else "s", keyword=escaped_keyword)
-        await _edit_or_send(status, message.chat_id, context, f"{header}\n{notice}" if notice else header)
-        await send_jobs(context.bot, message.chat_id, result.first_page, start_index=1,
+        await _edit_or_send(status, chat_id, context, f"{header}\n{notice}" if notice else header)
+        await send_jobs(context.bot, chat_id, result.first_page, start_index=1,
                         images=context.application.bot_data.get("images"))
-        service.record_sent(user.id, keyword, result.first_page)
+        service.record_sent(user_id, keyword, result.first_page)
 
         if result.more_session_id:
             await context.bot.send_message(
-                message.chat_id,
+                chat_id,
                 MSG_SHOWING.format(shown=len(result.first_page), total=total),
                 reply_markup=InlineKeyboardMarkup(
                     [[InlineKeyboardButton(SHOW_MORE_LABEL, callback_data=f"{CALLBACK_PREFIX}{result.more_session_id}")]]
                 ),
             )
     except RateLimitExceeded as exc:
-        await _edit_or_send(status, message.chat_id, context, _limit_message(exc.decision))
+        await _edit_or_send(status, chat_id, context, _limit_message(exc.decision))
     except FetchError:
         log.warning("Every job site failed for keyword %r", keyword)
-        await _edit_or_send(status, message.chat_id, context, MSG_FAILED)
+        await _edit_or_send(status, chat_id, context, MSG_FAILED)
     except TelegramError:
         log.exception("Telegram error while sending results for %r", keyword)
     except Exception:
         log.exception("Unexpected error while searching %r", keyword)
-        await _edit_or_send(status, message.chat_id, context, MSG_UNEXPECTED)
+        await _edit_or_send(status, chat_id, context, MSG_UNEXPECTED)
     finally:
-        active.discard(user.id)
+        active.discard(user_id)
 
 
 async def show_more(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -310,6 +357,10 @@ def build_application(
     images: JobImages | None = None,
 ) -> Application:
     async def post_init(app: Application) -> None:
+        try:
+            await app.bot.set_my_commands(BOT_COMMANDS)  # the "/" menu in Telegram
+        except TelegramError:
+            log.warning("Could not register the bot's command menu", exc_info=True)
         if health_port is not None:
             app.bot_data["health_server"] = await start_health_server(health_port)
 
@@ -335,7 +386,9 @@ def build_application(
     app.bot_data["limiter"] = limiter
     app.bot_data["images"] = images
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("categories", categories))
     app.add_handler(CallbackQueryHandler(show_more, pattern=f"^{CALLBACK_PREFIX}"))
+    app.add_handler(CallbackQueryHandler(choose_category, pattern=f"^{CATEGORY_PREFIX}"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search))
     app.add_error_handler(on_error)
     return app

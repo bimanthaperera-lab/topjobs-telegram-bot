@@ -18,13 +18,15 @@ Rules
   (newest first).
 - Word forms: engineer matches engineers / engineering, but only through real
   endings (-s, -ing, -er, ...), so "web" doesn't match "Weboda".
+- Strict (category buttons): tier 1 only, so "technical support" never falls back
+  to every "Support" title, customer support included.
 """
 
 from __future__ import annotations
 
 import math
 import re
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 
 from .models import Job
 
@@ -40,6 +42,9 @@ STOP_WORDS = frozenset(
 
 # Endings that turn one form of a word into another (engineer -> engineering).
 _ENDINGS = ("s", "es", "ing", "ings", "er", "ers", "ed", "or", "ors", "ment", "ments", "ion", "ions", "al")
+# Pairs that look like one word plus an ending but mean something else
+# ("intern" must not find "Internal Sales Assistant").
+_NOT_WORD_FORMS = frozenset({frozenset({"intern", "internal"})})
 
 # One-way: a search for the key also accepts these words.
 # ("software engineer" should find developers; "web developer" should not find civil engineers.)
@@ -75,7 +80,7 @@ def word_matches(title_word: str, term: str) -> bool:
     """Same word, or the same word with a common ending. Short terms (it, qa) must match exactly."""
     if title_word == term:
         return True
-    if len(term) < 3 or len(title_word) < 3:
+    if len(term) < 3 or len(title_word) < 3 or frozenset({title_word, term}) in _NOT_WORD_FORMS:
         return False
     if title_word.startswith(term):
         return title_word[len(term):] in _ENDINGS
@@ -92,8 +97,9 @@ def _strength(title_words: Sequence[str], term: str) -> float:
     return 0.0
 
 
-def rank_jobs(jobs: Sequence[Job], keyword: str) -> list[Job]:
-    """Relevant jobs only, best match first (site order kept within equal scores)."""
+def rank_jobs(jobs: Sequence[Job], keyword: str, *, strict: bool = False) -> list[Job]:
+    """Relevant jobs only, best match first (site order kept within equal scores).
+    strict: only titles with every word of the keyword (or its synonyms)."""
     terms = keyword_terms(keyword)
     if not terms or not jobs:
         return list(jobs)
@@ -127,7 +133,25 @@ def rank_jobs(jobs: Sequence[Job], keyword: str) -> list[Job]:
         score = sum(s * w for s, w in zip(row, weights))
         tiers[tier].append((score, index, job))
 
-    chosen = tiers[1] + tiers[2] if tiers[1] or tiers[2] else tiers[3]
+    if strict:
+        chosen = tiers[1]
+    else:
+        chosen = tiers[1] + tiers[2] if tiers[1] or tiers[2] else tiers[3]
     tier_of = {id(item): t for t in (1, 2, 3) for item in tiers[t]}
     chosen.sort(key=lambda item: (tier_of[id(item)], -round(item[0], 9), item[1]))
     return [job for _, _, job in chosen]
+
+
+
+def merge_by_priority(lists: Iterable[Sequence[Job]]) -> list[Job]:
+    """Concatenate ranked lists, best list first, dropping jobs already taken.
+    A category lists its most wanted kind of job first (e.g. "data engineer" before
+    "analytics"), so its best matches fill the first page."""
+    merged: list[Job] = []
+    seen: set[str] = set()
+    for jobs in lists:
+        for job in jobs:
+            if job.url not in seen:
+                seen.add(job.url)
+                merged.append(job)
+    return merged

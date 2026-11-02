@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 
 from .models import Job
 from .rate_limit import RateLimiter, RateLimitExceeded
-from .relevance import rank_jobs
+from .relevance import merge_by_priority, rank_jobs
 from .site_health import Notify, SiteHealth
 from .sources import JobSource, SourceError
 from .storage import Storage
@@ -144,18 +144,21 @@ class JobSearchService:
         part = "*" if getattr(source, "keyword_independent", False) else keyword
         return f"v3|{source.name}|{part}"
 
-    def _prepare(self, jobs: list[Job], keyword: str) -> list[Job]:
+    def _prepare(self, jobs: list[Job], keyword: str, strict: bool = False) -> list[Job]:
         """Rank a site's raw (cached) list for this keyword, best first.
 
         Not capped: already-sent jobs are removed later, so a cap here would run
         out of jobs after a few searches even with unseen matches further down.
+        strict (category phrases): exact title matches only, always ranked.
         """
+        if strict:
+            return rank_jobs(jobs, keyword, strict=True)
         return rank_jobs(jobs, keyword) if self._rank_results else jobs
 
     async def get_jobs(self, keyword: str, user_id: int | None = None) -> list[Job]:
         return (await self._collect(keyword, user_id)).jobs
 
-    async def _collect(self, keyword: str, user_id: int | None) -> _Collected:
+    async def _collect(self, keyword: str, user_id: int | None, strict: bool = False) -> _Collected:
         """Jobs from every site: cached per site, at most one request per site+keyword at a time.
 
         Only a search that has to contact a site counts against the fetch
@@ -208,11 +211,11 @@ class JobSearchService:
         answered = bool(cached)  # some site gave a usable answer, even an empty one
         for source in self._sources:
             if source.name in cached:
-                jobs.extend(self._prepare(cached[source.name], keyword))
+                jobs.extend(self._prepare(cached[source.name], keyword, strict))
                 continue
             outcome = fetched.get(source.name)
             if outcome is not None and not isinstance(outcome, BaseException):
-                jobs.extend(self._prepare(outcome, keyword))
+                jobs.extend(self._prepare(outcome, keyword, strict))
                 answered = True
                 continue
             if isinstance(outcome, BaseException):
@@ -222,13 +225,33 @@ class JobSearchService:
             # Failed, or skipped because the fetch budget is spent: fall back to older results.
             older = self._storage.get_cached_jobs(self._cache_key(source, keyword), self._stale_max_secs)
             if older is not None:
-                jobs.extend(self._prepare(older.jobs, keyword))
+                jobs.extend(self._prepare(older.jobs, keyword, strict))
                 stale.append(source.name)
             elif outcome is not None:
                 failed.append(source.name)
         if failed and not answered and not stale:
             raise FetchError(f"all sources failed: {', '.join(failed)}")
         return _Collected(jobs=jobs, failed_sources=failed, stale_sources=stale)
+
+    async def _collect_any(self, phrases: Sequence[str], user_id: int | None) -> _Collected:
+        """Jobs strictly matching any phrase, all of the first phrase's matches first.
+
+        A whole-category site is fetched once: every phrase after the first finds the
+        first one's request in flight (or its cached list), so it costs no budget.
+        """
+        outcomes = await asyncio.gather(*(self._collect(p, user_id, strict=True) for p in phrases),
+                                        return_exceptions=True)
+        for outcome in outcomes:
+            if isinstance(outcome, BaseException) and not isinstance(outcome, (FetchError, RateLimitExceeded)):
+                raise outcome
+        collected = [o for o in outcomes if isinstance(o, _Collected)]
+        if not collected:
+            raise outcomes[0]
+        return _Collected(
+            jobs=merge_by_priority(c.jobs for c in collected),
+            failed_sources=list(dict.fromkeys(name for c in collected for name in c.failed_sources)),
+            stale_sources=list(dict.fromkeys(name for c in collected for name in c.stale_sources)),
+        )
 
     async def _fetch_and_cache(self, source: JobSource, key: str, keyword: str) -> list[Job]:
         # Runs once per real request (waiters share the task), so health counts each request once.
@@ -258,8 +281,13 @@ class JobSearchService:
         self._alert_tasks.add(task)
         task.add_done_callback(self._alert_tasks.discard)
 
-    async def search(self, user_id: int, keyword: str) -> SearchResult:
-        collected = await self._collect(keyword, user_id)
+    async def search(self, user_id: int, keyword: str, any_of: Sequence[str] = ()) -> SearchResult:
+        """any_of: a category's phrases, matched strictly in priority order instead of
+        ranking `keyword`, which then only names the search (history, Show More)."""
+        if any_of:
+            collected = await self._collect_any(any_of, user_id)
+        else:
+            collected = await self._collect(keyword, user_id)
         last_sent = self._storage.get_last_sent_map(user_id, keyword)
         new_jobs = select_new_jobs(
             collected.jobs,

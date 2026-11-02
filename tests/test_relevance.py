@@ -1,7 +1,7 @@
 """Relevance ranking of job titles against the user's keyword."""
 
 from jobbot.models import Job
-from jobbot.relevance import keyword_terms, rank_jobs, word_matches
+from jobbot.relevance import keyword_terms, merge_by_priority, rank_jobs, word_matches
 
 from .conftest import FakeSource, make_service
 
@@ -115,6 +115,10 @@ def test_only_real_word_endings_count():
     assert not word_matches("weboda", "web")
     assert not word_matches("website", "web")
     assert not word_matches("soft", "software")
+    assert word_matches("interns", "intern")
+    assert not word_matches("internal", "intern")
+    assert not word_matches("intern", "internal")
+    assert word_matches("operational", "operation")  # "-al" still works elsewhere
 
 
 def test_weak_extra_word_is_not_enough():
@@ -183,3 +187,16 @@ async def test_ranking_disables_early_stop_but_never_repeats(storage):
     service.record_sent(1, "software engineer", first.first_page)
     again = await service.search(1, "software engineer")
     assert again.first_page == []  # all three already sent; chef never shown
+
+
+def test_strict_never_falls_back_to_the_job_word_alone():
+    jobs = [Job(url=f"https://x.lk/{t}", title=t) for t in
+            ("Customer Support Officer", "Business Support Associate", "IT Support Officer")]
+    assert [j.title for j in rank_jobs(jobs, "it support", strict=True)] == ["IT Support Officer"]
+    assert rank_jobs(jobs[:2], "technical support", strict=True) == []
+    assert len(rank_jobs(jobs[:2], "technical support")) == 2  # a typed search still falls back
+
+
+def test_merge_by_priority_keeps_list_order_and_drops_repeats():
+    a, b, c = (Job(url=f"https://x.lk/{n}", title=n) for n in "abc")
+    assert merge_by_priority([[b, a], [a, c], []]) == [b, a, c]

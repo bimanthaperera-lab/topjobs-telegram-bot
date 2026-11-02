@@ -5,6 +5,7 @@ import asyncio
 import pytest
 
 from jobbot.job_service import FetchError
+from jobbot.models import Job
 
 from .conftest import FakeSource, make_jobs, make_service
 
@@ -100,3 +101,13 @@ async def test_empty_result_is_cached(storage):
     assert await service.get_jobs("nothing") == []
     assert await service.get_jobs("nothing") == []
     assert source.calls == 1
+
+
+async def test_category_phrases_share_one_fetch_and_keep_priority(storage):
+    titles = ["Data Entry Operator", "Business Data Analyst", "Senior Data Engineer", "Data Engineer"]
+    source = FakeSource(jobs=[Job(url=f"https://x.lk/{i}", title=t, source="Site A") for i, t in enumerate(titles)])
+    source.keyword_independent = True  # a whole-category list, like TopJobs with TOPJOBS_CATEGORY
+    service = make_service(storage, source)
+    result = await service.search(1, "📊 Data", any_of=("data engineer", "data analyst"))
+    assert source.calls == 1
+    assert [j.title for j in result.first_page] == ["Senior Data Engineer", "Data Engineer", "Business Data Analyst"]

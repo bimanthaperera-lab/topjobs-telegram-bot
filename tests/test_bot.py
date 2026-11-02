@@ -6,19 +6,26 @@ from telegram.error import BadRequest
 
 from jobbot.bot import (
     CALLBACK_PREFIX,
+    CATEGORY_PREFIX,
     JOB_BUTTON_LABEL,
     SHOW_MORE_LABEL,
     _limit_message,
     _source_notice,
     build_application,
+    categories,
+    category_keyboard,
+    choose_category,
     job_keyboard,
     search,
     send_job,
     send_jobs,
     show_more,
+    start,
 )
+from jobbot.categories import CATEGORIES, category_by_id
 from jobbot.formatting import format_job
 from jobbot.models import Job
+from jobbot.normalize import normalize_keyword
 from jobbot.rate_limit import REASON_COOLDOWN, REASON_USER_FETCHES, Decision
 
 from .conftest import FakeSource, make_service
@@ -27,7 +34,8 @@ from .conftest import FakeSource, make_service
 def test_application_builds_with_handlers(storage):
     app = build_application("123456:" + "A" * 35, make_service(storage, FakeSource()))
     names = sorted(type(h).__name__ for h in app.handlers[0])
-    assert names == ["CallbackQueryHandler", "CommandHandler", "MessageHandler"]
+    assert names == ["CallbackQueryHandler", "CallbackQueryHandler", "CommandHandler", "CommandHandler",
+                     "MessageHandler"]
 
 
 def test_show_more_label_and_callback_size():
@@ -133,9 +141,11 @@ class FakeMessage:
         self.chat_id = 42
         self.status = FakeStatus()
         self.replies = []
+        self.reply_markups = []
 
     async def reply_text(self, text, **kwargs):
         self.replies.append(text)
+        self.reply_markups.append(kwargs.get("reply_markup"))
         return self.status
 
 
@@ -189,3 +199,55 @@ async def test_no_footer_when_everything_fits(storage):
                  fake_context(make_service(storage, FakeSource(jobs=jobs)), bot))
     assert msg.status.edits == ["🔎 Found 2 new jobs for <b>driver</b>:"]
     assert len(bot.sent) == 2 and all(button(m).url for m in bot.sent)
+
+
+# --- category menu ----------------------------------------------------------------
+
+def test_categories_are_valid_buttons():
+    ids = [c.id for c in CATEGORIES]
+    assert len(ids) == len(set(ids))
+    for c in CATEGORIES:
+        assert len((CATEGORY_PREFIX + c.id).encode()) <= 64  # Telegram's callback_data limit
+        assert c.phrases and all(p == normalize_keyword(p) for p in c.phrases)  # same form as typed
+        assert category_by_id(c.id) is c
+    assert category_by_id("nope") is None
+
+
+def test_category_keyboard_two_per_row():
+    rows = category_keyboard().inline_keyboard
+    assert all(len(row) <= 2 for row in rows)
+    flat = [b for row in rows for b in row]
+    assert [b.text for b in flat] == [c.label for c in CATEGORIES]
+    assert [b.callback_data for b in flat] == [f"{CATEGORY_PREFIX}{c.id}" for c in CATEGORIES]
+
+
+async def test_start_and_categories_show_the_menu():
+    for handler in (start, categories):
+        msg = FakeMessage("/x")
+        await handler(SimpleNamespace(effective_message=msg), None)
+        assert msg.reply_markups[0].inline_keyboard == category_keyboard().inline_keyboard
+
+
+async def test_category_button_searches_its_phrases(storage):
+    jobs = [Job(url=f"https://x.lk/{i}", title=f"QA Engineer {i}", source="TopJobs.lk") for i in range(2)]
+    jobs.append(Job(url="https://x.lk/acc", title="Accountant", source="TopJobs.lk"))  # no phrase matches
+    bot = FakeBot()
+    query = FakeQuery(f"{CATEGORY_PREFIX}qa")
+    await choose_category(SimpleNamespace(callback_query=query, effective_user=SimpleNamespace(id=7)),
+                          fake_context(make_service(storage, FakeSource(jobs=jobs)), bot))
+    assert query.answers == [((), {})]
+    assert not query.markup_removed  # the menu stays for the next pick
+    texts = [m.text for m in bot.sent]
+    assert texts[0].startswith("🔎 Searching for <b>🧪 QA / Testing</b>")
+    assert "🔎 Found 2 new jobs for <b>🧪 QA / Testing</b>:" in texts
+    assert sum(1 for m in bot.sent if getattr(m, "reply_markup", None) and button(m).url) == 2
+
+
+async def test_unknown_category_alerts_without_searching(storage):
+    bot = FakeBot()
+    query = FakeQuery(f"{CATEGORY_PREFIX}gone")
+    await choose_category(SimpleNamespace(callback_query=query, effective_user=SimpleNamespace(id=7)),
+                          fake_context(make_service(storage, FakeSource()), bot))
+    (args, kwargs), = query.answers
+    assert "no longer available" in args[0] and kwargs["show_alert"]
+    assert bot.sent == []
