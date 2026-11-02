@@ -8,8 +8,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY jobbot ./jobbot
 
-RUN useradd --create-home bot && mkdir -p /data && chown bot /data
+# The bot runs as a non-root user. It must be able to write the SQLite file both
+# in /data (the default) and in /app (if DATABASE_PATH is set to a relative path).
+# No VOLUME here: hosts like Render ignore it; with plain Docker, mount one with -v.
+RUN useradd --create-home bot && mkdir -p /data && chown bot /data /app
 USER bot
-VOLUME ["/data"]
 
 CMD ["python", "-m", "jobbot"]

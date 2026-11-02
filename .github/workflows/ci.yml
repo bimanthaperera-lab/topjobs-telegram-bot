@@ -64,6 +64,13 @@ jobs:
         # Same image Render builds; proves dependencies install and the code loads.
         run: docker run --rm jobbot:ci python -c "import jobbot.__main__, jobbot.bot; print('image ok')"
 
+      - name: Database is writable as the non-root user
+        # Default /data path and a relative path (resolves to /app) must both work.
+        run: |
+          docker run --rm jobbot:ci python -c "from jobbot.storage import Storage; Storage('/data/jobbot.sqlite3'); print('default path ok')"
+          docker run --rm jobbot:ci python -c "from jobbot.storage import Storage; Storage('jobbot.sqlite3'); print('relative path ok')"
+          docker run --rm jobbot:ci python -c "from jobbot.storage import Storage; Storage('/data/sub/dir/jobbot.sqlite3'); print('nested path ok')"
+
       - name: Config check without secrets fails cleanly
         # No TELEGRAM_BOT_TOKEN in CI: the bot must exit with code 2 and a clear message, not crash.
         run: |

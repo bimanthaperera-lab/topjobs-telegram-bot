@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
+import tempfile
 
 from telegram import Update
 
@@ -17,7 +19,7 @@ from .sources import JobSource
 from .sources.http import PoliteHttpClient, build_http_client
 from .sources.topjobs import TopJobsSource
 from .sources.xpressjobs import XpressJobsSource
-from .storage import Storage
+from .storage import Storage, StorageError
 
 log = logging.getLogger("jobbot")
 
@@ -31,6 +33,20 @@ def build_sources(settings: Settings, http: PoliteHttpClient) -> list[JobSource]
     return sources
 
 
+def open_storage(path: str) -> Storage:
+    """Open the database; if its location isn't writable, keep the bot running on a temp file.
+
+    The database only holds caches, history and counters, so losing it on restart
+    is acceptable (Render's free plan does that anyway), but crashing is not.
+    """
+    try:
+        return Storage(path)
+    except StorageError as exc:
+        fallback = os.path.join(tempfile.gettempdir(), "jobbot.sqlite3")
+        log.error("%s Falling back to %s; data will not survive restarts.", exc, fallback)
+        return Storage(fallback)
+
+
 def main() -> int:
     try:
         settings = load_settings()
@@ -42,7 +58,7 @@ def main() -> int:
     for warning in settings.warnings:
         log.warning("Configuration: %s", warning)
 
-    storage = Storage(settings.database_path)
+    storage = open_storage(settings.database_path)
     purged = storage.purge_old_sessions(SESSION_MAX_AGE_SECS)
     if purged:
         log.info("Removed %d expired Show More sessions", purged)

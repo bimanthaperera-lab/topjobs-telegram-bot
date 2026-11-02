@@ -6,6 +6,7 @@ All queries are small and indexed, so they run inline on the event loop.
 from __future__ import annotations
 
 import json
+import os
 import secrets
 import sqlite3
 import threading
@@ -75,11 +76,24 @@ def _load(raw: str) -> list[Job]:
     return [Job.from_dict(d) for d in json.loads(raw)]
 
 
+class StorageError(RuntimeError):
+    """The database file can't be created or opened."""
+
+
 class Storage:
     def __init__(self, path: str, clock: Callable[[], float] = time.time) -> None:
         self._clock = clock
         self._lock = threading.Lock()
-        self._conn = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
+        try:
+            if path != ":memory:":
+                os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+            self._conn = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
+            self._conn.execute("SELECT 1")
+        except (OSError, sqlite3.Error) as exc:
+            raise StorageError(
+                f"Can't open the database at {os.path.abspath(path)!r} ({exc}). "
+                "Check that its folder is writable, or unset DATABASE_PATH to use the default."
+            ) from exc
         self._conn.row_factory = sqlite3.Row
         if path != ":memory:":
             self._conn.execute("PRAGMA journal_mode=WAL")
