@@ -18,9 +18,6 @@ log = logging.getLogger(__name__)
 
 JOBS_PER_SEARCH = 10
 PAGE_SIZE = 5
-# Cache more than one search needs so repeat searches can still find unseen jobs
-# without contacting the site again.
-JOBS_PER_SOURCE = 30
 # How many results to ask each site for before ranking. TopJobs sends every match in
 # one page anyway, so this costs no extra requests.
 FETCH_LIMIT = 500
@@ -112,7 +109,6 @@ class JobSearchService:
         cache_ttl_secs: float,
         jobs_per_search: int = JOBS_PER_SEARCH,
         page_size: int = PAGE_SIZE,
-        jobs_per_source: int = JOBS_PER_SOURCE,
         limiter: RateLimiter | None = None,
         stale_max_secs: float = STALE_MAX_SECS,
         health: SiteHealth | None = None,
@@ -131,10 +127,9 @@ class JobSearchService:
         self._cache_ttl_secs = cache_ttl_secs
         self._jobs_per_search = jobs_per_search
         self._page_size = page_size
-        self._jobs_per_source = jobs_per_source
         self._limiter = limiter
         self._rank_results = rank_results
-        self._fetch_limit = max(fetch_limit, jobs_per_source)
+        self._fetch_limit = fetch_limit
         # Ranking puts the best match first, not the newest, so stopping at the last
         # job sent would skip new jobs; the sent-URL check alone prevents repeats then.
         self._newest_first = (
@@ -150,9 +145,12 @@ class JobSearchService:
         return f"v3|{source.name}|{part}"
 
     def _prepare(self, jobs: list[Job], keyword: str) -> list[Job]:
-        """Rank a site's raw (cached) list for this keyword, best first, and cap it."""
-        ranked = rank_jobs(jobs, keyword) if self._rank_results else jobs
-        return ranked[: self._jobs_per_source]
+        """Rank a site's raw (cached) list for this keyword, best first.
+
+        Not capped: already-sent jobs are removed later, so a cap here would run
+        out of jobs after a few searches even with unseen matches further down.
+        """
+        return rank_jobs(jobs, keyword) if self._rank_results else jobs
 
     async def get_jobs(self, keyword: str, user_id: int | None = None) -> list[Job]:
         return (await self._collect(keyword, user_id)).jobs
