@@ -29,6 +29,9 @@ CATEGORIES: tuple[Category, ...] = (
     Category("data", "📊 Data", "data"),
     Category("ai", "🤖 AI", "ai"),
     Category("sec", "🔐 Cyber Security", "security"),
+    # Also finds some customer/business support jobs; "support engineer" is cleaner but
+    # misses "IT Support Officer" titles.
+    Category("support", "🛠 Support", "support"),
     Category("pm", "📋 Project Manager", "project manager"),
     Category("intern", "🎓 Internships", "intern"),
 )
