@@ -23,6 +23,7 @@ from telegram.ext import (
 )
 
 from .categories import CATEGORIES, category_by_id
+from .channel_gate import ChannelGate
 from .formatting import TELEGRAM_MAX_CAPTION, format_job, telegram_length
 from .health import start_health_server
 from .job_service import PAGE_SIZE, FetchError, JobSearchService
@@ -48,6 +49,9 @@ MAX_BUTTON_URL = 2000
 CALLBACK_PREFIX = "more:"
 CATEGORY_PREFIX = "cat:"
 CATEGORY_COLUMNS = 2
+JOINED_CALLBACK = "joined"
+JOIN_LABEL = "📢 Join channel"
+JOINED_LABEL = "✅ I've joined"
 
 _NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
@@ -58,6 +62,9 @@ MSG_WELCOME = (
 )
 MSG_PICK_CATEGORY = "Pick a category, or send me any keyword:"
 MSG_UNKNOWN_CATEGORY = "This category is no longer available. Send /categories to see the current list."
+MSG_JOIN_FIRST = "📢 Please join our channel to use this bot, then tap <b>✅ I've joined</b>."
+MSG_NOT_JOINED = "You haven't joined the channel yet. Join it, then tap ✅ I've joined again."
+MSG_THANKS_JOINED = "Thanks for joining!"
 MSG_ASK_KEYWORD = "Please send a keyword, for example <i>software engineer</i>."
 MSG_TOO_LONG = f"That keyword is too long. Please keep it under {MAX_KEYWORD_LENGTH} characters."
 MSG_BUSY = "⏳ I'm still working on your previous search. Please wait for it to finish."
@@ -117,7 +124,7 @@ def _limit_message(decision: Decision) -> str:
     return template.format(wait=format_wait(decision.retry_after_secs))
 
 
-async def _warn(context: ContextTypes.DEFAULT_TYPE, reply, user_id: int, text: str) -> None:
+async def _warn(context: ContextTypes.DEFAULT_TYPE, reply, user_id: int, text: str, **kwargs) -> None:
     """Reply to a blocked request, but at most once per WARN_INTERVAL_SECS per user so
     a flooding user cannot make the bot flood Telegram back."""
     warned: dict[int, float] = context.application.bot_data.setdefault("warned_at", {})
@@ -126,9 +133,51 @@ async def _warn(context: ContextTypes.DEFAULT_TYPE, reply, user_id: int, text: s
         return
     warned[user_id] = now
     try:
-        await reply(text)
+        await reply(text, **kwargs)
     except TelegramError:
         log.warning("Could not send a rate-limit notice", exc_info=True)
+
+
+def join_keyboard(gate: ChannelGate) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(JOIN_LABEL, url=gate.link)],
+        [InlineKeyboardButton(JOINED_LABEL, callback_data=JOINED_CALLBACK)],
+    ])
+
+
+def members_only(handler: Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]]):
+    """Run the handler only for users in the required channel (when one is set);
+    everyone else gets the join prompt, at most once per WARN_INTERVAL_SECS."""
+    @functools.wraps(handler)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        gate: ChannelGate | None = context.application.bot_data.get("gate")
+        user = update.effective_user
+        if gate is None or user is None or await gate.is_member(context.bot, user.id):
+            await handler(update, context)
+            return
+        if update.callback_query is not None:
+            await update.callback_query.answer()
+        chat_id = update.effective_chat.id if update.effective_chat else user.id
+        await _warn(context, functools.partial(context.bot.send_message, chat_id), user.id,
+                    MSG_JOIN_FIRST, parse_mode=ParseMode.HTML, reply_markup=join_keyboard(gate))
+    return wrapper
+
+
+async def check_joined(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """The "I've joined" button: check again, then show the welcome and category menu."""
+    query = update.callback_query
+    user = update.effective_user
+    if query is None or user is None:
+        return
+    gate: ChannelGate | None = context.application.bot_data.get("gate")
+    if gate is not None and not await gate.is_member(context.bot, user.id, fresh=True):
+        await query.answer(MSG_NOT_JOINED, show_alert=True)
+        return
+    await query.answer(MSG_THANKS_JOINED)
+    await _remove_button(query)
+    chat_id = query.message.chat.id if query.message else user.id
+    await context.bot.send_message(chat_id, MSG_WELCOME, parse_mode=ParseMode.HTML,
+                                   reply_markup=category_keyboard())
 
 
 def category_keyboard() -> InlineKeyboardMarkup:
@@ -345,7 +394,7 @@ async def _remove_button(query) -> None:
     except BadRequest:
         pass  # already removed (e.g. second click) or message too old to edit
     except TelegramError:
-        log.warning("Could not remove the Show More button", exc_info=True)
+        log.warning("Could not remove a button", exc_info=True)
 
 
 def build_application(
@@ -355,6 +404,7 @@ def build_application(
     health_port: int | None = None,
     shutdown_hooks: list[Callable[[], Awaitable[None]]] | None = None,
     images: JobImages | None = None,
+    gate: ChannelGate | None = None,
 ) -> Application:
     async def post_init(app: Application) -> None:
         try:
@@ -385,10 +435,12 @@ def build_application(
     app.bot_data["service"] = service
     app.bot_data["limiter"] = limiter
     app.bot_data["images"] = images
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("categories", categories))
-    app.add_handler(CallbackQueryHandler(show_more, pattern=f"^{CALLBACK_PREFIX}"))
-    app.add_handler(CallbackQueryHandler(choose_category, pattern=f"^{CATEGORY_PREFIX}"))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search))
+    app.bot_data["gate"] = gate
+    app.add_handler(CommandHandler("start", members_only(start)))
+    app.add_handler(CommandHandler("categories", members_only(categories)))
+    app.add_handler(CallbackQueryHandler(members_only(show_more), pattern=f"^{CALLBACK_PREFIX}"))
+    app.add_handler(CallbackQueryHandler(members_only(choose_category), pattern=f"^{CATEGORY_PREFIX}"))
+    app.add_handler(CallbackQueryHandler(check_joined, pattern=f"^{JOINED_CALLBACK}$"))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, members_only(search)))
     app.add_error_handler(on_error)
     return app
