@@ -1,6 +1,6 @@
 # Posts IT jobs to a Telegram channel four times a day, 5 per site per run (TopJobs 5,
-# XpressJobs 5): new jobs first (tagged "🆕 New Match"), then the newest jobs not posted
-# in the last 24 hours. See jobbot/notify.py.
+# XpressJobs 5): new jobs first (tagged "🆕 New Match"), then the newest jobs never posted
+# before. A job is posted only once. See jobbot/notify.py.
 #
 # Needs two repository secrets (Settings -> Secrets and variables -> Actions):
 #   TELEGRAM_BOT_TOKEN  the bot's token
@@ -8,7 +8,8 @@
 # The bot must be an admin of the channel with permission to post messages.
 # Optional repository variable (Variables tab, same page):
 #   XPRESSJOBS_ENABLED   "true" to also post XpressJobs' jobs. Only with XpressJobs' permission.
-#   NOTIFY_REPOST_HOURS  hours before a job can be posted again (default 24, e.g. 48).
+#   NOTIFY_REPOST_HOURS  set (e.g. 48) to let a job be posted again after that many hours.
+#                        Unset: a job is never posted twice.
 name: Job alerts
 
 on:

@@ -257,9 +257,9 @@ may start scheduled runs a few minutes late. Each run:
    - **New jobs first**, tagged **🆕 New Match**: jobs that appeared since the alerts started and
      haven't been posted yet. More than 5 new on a site? The rest go first in the next run. A job
      stays "new" for 48 hours. Both sites' new jobs are posted before any older job.
-   - **Then the pool:** each site's 10 newest jobs (20 from TopJobs when XpressJobs is off),
-     skipping any job posted in the **last 24 hours**. Set the repository variable
-     `NOTIFY_REPOST_HOURS` to `48` to repeat jobs less often.
+   - **Then the pool:** each site's 10 newest jobs (20 from TopJobs when XpressJobs is off)
+     that were **never posted before**. A job is posted only once. To let jobs come back after a
+     while, set the repository variable `NOTIFY_REPOST_HOURS` (e.g. `48`).
    - **Nothing left?** Nothing is posted.
 4. **Remembers what it saw and posted** in `.notify-state/seen.json`, which the Actions cache
    carries between runs. Jobs already listed on the first run, or when what is tracked changes

@@ -1,4 +1,4 @@
-"""Scheduled channel posts: 5 IT jobs per site, new jobs first, then the pool with a repost cooldown."""
+"""Scheduled channel posts: 5 IT jobs per site, new jobs first, then the pool; nothing posted twice."""
 
 import json
 from types import SimpleNamespace
@@ -210,7 +210,7 @@ async def test_each_site_keeps_its_own_quota(tmp_path):
     assert xpress == [(t, False) for t in se(3, 2, 1, x=True)]  # 8..4 went out an hour ago
 
 
-async def test_pool_rotates_then_waits_out_the_cooldown(tmp_path):
+async def test_posted_jobs_are_never_posted_again(tmp_path):
     s = settings(tmp_path)
     site = [FakeTopJobs(newest_first(tj, 25))]  # one site: the pool is its newest 20 (25..6)
     rounds = []
@@ -218,23 +218,35 @@ async def test_pool_rotates_then_waits_out_the_cooldown(tmp_path):
         bot, _ = await post(s, site, T0 + hours * HOUR)
         rounds.append(bot.titles())
     assert [r[0] for r in rounds] == se(25, 20, 15, 10)
-    assert sum(len(r) for r in rounds) == 20
+    assert sum(len(r) for r in rounds) == 20 and len(set(sum(rounds, []))) == 20
 
-    quiet, _ = await post(s, site, T0 + 20 * HOUR)
-    assert quiet.sent == []  # every pool job went out in the last 24h: send nothing
+    for hours in (20, 24, 72):
+        quiet, _ = await post(s, site, T0 + hours * HOUR)
+        assert quiet.sent == []  # the pool was all posted, nothing new: send nothing
 
-    next_day, _ = await post(s, site, T0 + 24 * HOUR)
-    assert next_day.titles() == se(25, 24, 23, 22, 21)
+    bot, _ = await post(s, [FakeTopJobs(newest_first(tj, 26))], T0 + 73 * HOUR)
+    assert bot.posts() == [("Software Engineer 26", True)]  # only the new one
 
 
-async def test_longer_cooldown(tmp_path):
+async def test_reposting_can_be_switched_on(tmp_path):
     s = settings(tmp_path, repost_hours=48)
     site = [FakeTopJobs(newest_first(tj, 5))]
     await post(s, site, T0)
     bot, _ = await post(s, site, T0 + 24 * HOUR)
     assert bot.sent == []
     bot, _ = await post(s, site, T0 + 48 * HOUR)
-    assert len(bot.sent) == 5
+    assert bot.titles() == se(5, 4, 3, 2, 1)
+
+
+def test_repost_setting_is_off_unless_set(monkeypatch):
+    from jobbot.notify import load_notify_settings
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "x")
+    monkeypatch.setenv("NOTIFY_CHAT_ID", "@c")
+    monkeypatch.setenv("NOTIFY_REPOST_HOURS", "")
+    assert load_notify_settings().repost_hours is None
+    monkeypatch.setenv("NOTIFY_REPOST_HOURS", "48")
+    assert load_notify_settings().repost_hours == 48
 
 
 async def test_new_jobs_beyond_the_quota_wait_for_the_next_run(tmp_path):
@@ -244,7 +256,7 @@ async def test_new_jobs_beyond_the_quota_wait_for_the_next_run(tmp_path):
     first, _ = await post(s, site, T0 + HOUR)
     second, _ = await post(s, site, T0 + 2 * HOUR)
     assert first.posts() == [("Software Engineer 4", True), ("Software Engineer 3", True)]
-    assert second.posts() == [("Software Engineer 2", True)]  # job 1 was posted within 24h
+    assert second.posts() == [("Software Engineer 2", True)]  # job 1 was already posted
 
 
 async def test_new_tag_expires_after_48_hours(tmp_path):
@@ -252,7 +264,7 @@ async def test_new_tag_expires_after_48_hours(tmp_path):
     await post(s, [FakeTopJobs([tj(1)])], T0)
     await post(s, [FakeTopJobs(newest_first(tj, 3))], T0 + HOUR)  # 3 posted as new; 2 waits
     bot, _ = await post(settings(tmp_path, per_site=3), [FakeTopJobs(newest_first(tj, 3))], T0 + 50 * HOUR)
-    assert bot.posts() == [(t, False) for t in se(3, 2, 1)]
+    assert bot.posts() == [("Software Engineer 2", False)]  # untagged now; 3 and 1 went out before
 
 
 async def test_site_switched_on_later_is_not_tagged_new(tmp_path):
@@ -280,8 +292,8 @@ async def test_oldest_state_file_is_upgraded(tmp_path):
     with open(s.state_file, "w", encoding="utf-8") as fh:
         json.dump(["https://x.lk/1"], fh)  # the oldest format: URLs already posted
     bot, _ = await post(s, [FakeTopJobs([tj(2), tj(1)])], T0)
-    assert bot.posts() == [(t, False) for t in se(2, 1)]
-    assert load_state(s.state_file, T0).posted == {"https://x.lk/2": T0, "https://x.lk/1": T0}
+    assert bot.posts() == [("Software Engineer 2", False)]  # 1 was posted under the old format
+    assert load_state(s.state_file, T0).posted == {"https://x.lk/2": T0, "https://x.lk/1": 0.0}
 
 
 async def test_duplicate_listings_are_posted_once(tmp_path):
