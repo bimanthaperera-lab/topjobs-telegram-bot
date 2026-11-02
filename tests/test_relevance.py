@@ -115,6 +115,10 @@ def test_only_real_word_endings_count():
     assert not word_matches("weboda", "web")
     assert not word_matches("website", "web")
     assert not word_matches("soft", "software")
+    assert word_matches("interns", "intern")
+    assert not word_matches("internal", "intern")
+    assert not word_matches("intern", "internal")
+    assert word_matches("operational", "operation")  # "-al" still works elsewhere
 
 
 def test_weak_extra_word_is_not_enough():

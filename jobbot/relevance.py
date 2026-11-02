@@ -42,6 +42,9 @@ STOP_WORDS = frozenset(
 
 # Endings that turn one form of a word into another (engineer -> engineering).
 _ENDINGS = ("s", "es", "ing", "ings", "er", "ers", "ed", "or", "ors", "ment", "ments", "ion", "ions", "al")
+# Pairs that look like one word plus an ending but mean something else
+# ("intern" must not find "Internal Sales Assistant").
+_NOT_WORD_FORMS = frozenset({frozenset({"intern", "internal"})})
 
 # One-way: a search for the key also accepts these words.
 # ("software engineer" should find developers; "web developer" should not find civil engineers.)
@@ -77,7 +80,7 @@ def word_matches(title_word: str, term: str) -> bool:
     """Same word, or the same word with a common ending. Short terms (it, qa) must match exactly."""
     if title_word == term:
         return True
-    if len(term) < 3 or len(title_word) < 3:
+    if len(term) < 3 or len(title_word) < 3 or frozenset({title_word, term}) in _NOT_WORD_FORMS:
         return False
     if title_word.startswith(term):
         return title_word[len(term):] in _ENDINGS
