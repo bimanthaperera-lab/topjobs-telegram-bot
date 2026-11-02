@@ -5,8 +5,8 @@ A Telegram bot for **IT and software jobs** in Sri Lanka. It reads **TopJobs.lk*
 - **Search:** each job arrives as its **ad image**, with the details as the caption and a
   **🔗 View & Apply** button. Each search sends 5 jobs, and **Thawa Jobs Pennanna (Show More)**
   sends the rest.
-- **Alerts:** a scheduled GitHub Action posts **new software engineering jobs to a Telegram
-  channel** three times a day. See [Job alerts channel](#job-alerts-channel).
+- **Alerts:** a scheduled GitHub Action posts **software engineering jobs to a Telegram
+  channel**, 5 at a time, four times a day. New jobs come first. See [Job alerts channel](#job-alerts-channel).
 
 > **XpressJobs is switched off by default.** Its terms of use forbid scraping
 > ("spider, crawl, or scrape") without permission. Set `XPRESSJOBS_ENABLED=true` only after
@@ -240,17 +240,31 @@ Open a pull request into `main`, wait for green checks, then merge. Merging is w
 ### Job alerts channel
 
 [`.github/workflows/job-alerts.yml`](.github/workflows/job-alerts.yml) runs
-[`jobbot/notify.py`](jobbot/notify.py) at **09:00, 13:00 and 18:00 Sri Lanka time**. GitHub may
-start scheduled runs a few minutes late. Each run:
+[`jobbot/notify.py`](jobbot/notify.py) at **08:00, 12:00, 16:00 and 20:00 Sri Lanka time**. GitHub
+may start scheduled runs a few minutes late. Each run:
 1. **Fetches** TopJobs' IT-Software category in one request.
+   With `XPRESSJOBS_ENABLED`, it also fetches XpressJobs' 300 newest jobs (all categories, up to
+   3 requests).
 2. **Keeps software engineering titles:** engineer, developer, programmer, DevOps, QA, full
    stack, tech lead… It drops look-alikes such as sales, network engineer and content developer.
-3. **Posts the new ones to your channel:** a "🆕 N new software engineering jobs" header, then
-   each job as its ad image with the **View & Apply** button. At most 15 per run. If there are
-   more, it posts the newest 15 and says so.
-4. **Remembers what it posted** in `.notify-state/seen.json`. The Actions cache carries it
-   between runs, so nothing is posted twice. The first run only records the current jobs and
-   posts "alerts are on".
+   XpressJobs lists every category, so there "engineer" alone isn't enough: the title has to name
+   a software role (software, developer, DevOps, QA engineer, ML/data/cloud engineer…), which
+   keeps civil, mechanical and procurement engineers out.
+3. **Ranks them:** "software engineer"-like titles first, then the rest, newest first.
+4. **Posts 5 jobs**, each as its own message (the ad image with the **View & Apply** button;
+   XpressJobs has no ad images, so its jobs are text with the same button):
+   - **New jobs first**, tagged **🆕 New Match**: jobs that appeared since the alerts started and
+     haven't been posted yet. More than 5 new? The rest go first in the next run. A job stays
+     "new" for 48 hours.
+   - **Then the pool:** the top 20 ranked jobs, 10 from each site (all 20 from TopJobs when
+     XpressJobs is off), skipping any job posted in the **last 24 hours**. Set the repository
+     variable `NOTIFY_REPOST_HOURS` to `48` to repeat jobs less often.
+   - **Nothing left?** Nothing is posted.
+5. **Remembers what it saw and posted** in `.notify-state/seen.json`, which the Actions cache
+   carries between runs. Jobs already listed on the first run (or when XpressJobs is switched on)
+   are never tagged new, so the channel isn't flooded.
+6. **Keeps going if one site fails:** the other site's jobs are still posted, and the run is
+   marked failed so you notice.
 
 **One-time setup:**
 1. **Create the channel:** in Telegram, create a channel (public, e.g. `@lk_software_jobs`, or
@@ -261,8 +275,10 @@ start scheduled runs a few minutes late. Each run:
    repository secret**:
    - `TELEGRAM_BOT_TOKEN`: the bot token.
    - `NOTIFY_CHAT_ID`: `@yourchannel`, or for a private channel its numeric id (`-100…`).
-4. **Test it:** **Actions → Job alerts → Run workflow**. The channel should get "✅ Software
-   engineering job alerts are on…".
+4. **Test it:** **Actions → Job alerts → Run workflow**. The channel should get the 5 top-ranked
+   jobs.
+5. **XpressJobs (optional, only with their permission):** on the same Settings page, open the
+   **Variables** tab → **New repository variable** → name `XPRESSJOBS_ENABLED`, value `true`.
 
 To change the times, edit the `cron` line (in UTC: Sri Lanka time is UTC+5:30). To change which
 titles count, edit `SOFTWARE_TITLE` / `NOT_SOFTWARE` in `jobbot/notify.py`.

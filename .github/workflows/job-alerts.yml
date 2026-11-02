@@ -1,16 +1,20 @@
-# Posts new software engineering jobs from TopJobs.lk to a Telegram channel,
-# three times a day. See jobbot/notify.py.
+# Posts software engineering jobs to a Telegram channel four times a day, 5 per run:
+# new jobs first (tagged "🆕 New Match"), then the top-ranked jobs not posted in the
+# last 24 hours. See jobbot/notify.py.
 #
 # Needs two repository secrets (Settings -> Secrets and variables -> Actions):
 #   TELEGRAM_BOT_TOKEN  the bot's token
 #   NOTIFY_CHAT_ID      the channel: "@channelname" or its numeric id (-100...)
 # The bot must be an admin of the channel with permission to post messages.
+# Optional repository variable (Variables tab, same page):
+#   XPRESSJOBS_ENABLED   "true" to also post XpressJobs' jobs. Only with XpressJobs' permission.
+#   NOTIFY_REPOST_HOURS  hours before a job can be posted again (default 24, e.g. 48).
 name: Job alerts
 
 on:
   schedule:
-    # 09:00, 13:00 and 18:00 Sri Lanka time (UTC+5:30). GitHub may start runs a few minutes late.
-    - cron: "30 3,7,12 * * *"
+    # 08:00, 12:00, 16:00 and 20:00 Sri Lanka time (UTC+5:30). GitHub may start runs a few minutes late.
+    - cron: "30 2,6,10,14 * * *"
   workflow_dispatch: # "Run workflow" button for testing
 
 permissions:
@@ -44,11 +48,13 @@ jobs:
           key: notify-state-${{ github.run_id }}
           restore-keys: notify-state-
 
-      - name: Post new software engineering jobs
+      - name: Post software engineering jobs
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           NOTIFY_CHAT_ID: ${{ secrets.NOTIFY_CHAT_ID }}
           NOTIFY_STATE_FILE: .notify-state/seen.json
+          XPRESSJOBS_ENABLED: ${{ vars.XPRESSJOBS_ENABLED }}
+          NOTIFY_REPOST_HOURS: ${{ vars.NOTIFY_REPOST_HOURS }}
         run: python -m jobbot.notify
 
       - name: Save the list of jobs already posted
