@@ -52,8 +52,8 @@ MSG_TOO_LONG = f"That keyword is too long. Please keep it under {MAX_KEYWORD_LEN
 MSG_BUSY = "⏳ I'm still working on your previous search. Please wait for it to finish."
 MSG_SEARCHING = "🔎 Searching for <b>{keyword}</b> jobs..."
 MSG_NO_NEW = (
-    "No new jobs found for <b>{keyword}</b> right now. "
-    "You've already seen the latest results. Please try again later or search for another keyword."
+    "No new jobs matching <b>{keyword}</b> right now. "
+    "Either you've seen them all, or none fit. Try again later, or use different words."
 )
 MSG_FAILED = "⚠️ Sorry, the job sites couldn't be reached right now. Please try again in a few minutes."
 MSG_SOURCE_DOWN = "<i>⚠️ {sites} couldn't be reached, so these results may be incomplete.</i>"

@@ -47,6 +47,8 @@ class FakeSource:
 
 def make_service(storage, *sources, **kwargs) -> JobSearchService:
     kwargs.setdefault("cache_ttl_secs", 3600)
+    # Fake titles ("job 1") don't match real keywords; ranking has its own tests.
+    kwargs.setdefault("rank_results", False)
     return JobSearchService(storage, list(sources) or [FakeSource()], **kwargs)
 
 

@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 
 from .models import Job
 from .rate_limit import RateLimiter, RateLimitExceeded
+from .relevance import rank_jobs
 from .site_health import Notify, SiteHealth
 from .sources import JobSource, SourceError
 from .storage import Storage
@@ -20,6 +21,9 @@ PAGE_SIZE = 5
 # Cache more than one search needs so repeat searches can still find unseen jobs
 # without contacting the site again.
 JOBS_PER_SOURCE = 30
+# How many results to ask each site for before ranking. TopJobs sends every match in
+# one page anyway, so this costs no extra requests.
+FETCH_LIMIT = 500
 SESSION_MAX_AGE_SECS = 24 * 3600
 # When a site can't be reached, results up to this old are shown (marked as possibly outdated).
 STALE_MAX_SECS = 48 * 3600
@@ -112,6 +116,8 @@ class JobSearchService:
         stale_max_secs: float = STALE_MAX_SECS,
         health: SiteHealth | None = None,
         notify: Notify | None = None,
+        rank_results: bool = True,
+        fetch_limit: int = FETCH_LIMIT,
     ) -> None:
         if not sources:
             raise ValueError("at least one job source is required")
@@ -126,12 +132,19 @@ class JobSearchService:
         self._page_size = page_size
         self._jobs_per_source = jobs_per_source
         self._limiter = limiter
-        self._newest_first = {s.name for s in self._sources if s.sorted_newest_first}
+        self._rank_results = rank_results
+        self._fetch_limit = max(fetch_limit, jobs_per_source)
+        # Ranking puts the best match first, not the newest, so stopping at the last
+        # job sent would skip new jobs; the sent-URL check alone prevents repeats then.
+        self._newest_first = (
+            set() if rank_results else {s.name for s in self._sources if s.sorted_newest_first}
+        )
         self._in_flight: dict[str, asyncio.Task[list[Job]]] = {}
 
     @staticmethod
     def _cache_key(source: JobSource, keyword: str) -> str:
-        return f"{source.name}|{keyword}"
+        # Version prefix: entries cached before ranking existed are ignored.
+        return f"v2|{source.name}|{keyword}"
 
     async def get_jobs(self, keyword: str, user_id: int | None = None) -> list[Job]:
         return (await self._collect(keyword, user_id)).jobs
@@ -214,11 +227,15 @@ class JobSearchService:
     async def _fetch_and_cache(self, source: JobSource, key: str, keyword: str) -> list[Job]:
         # Runs once per real request (waiters share the task), so health counts each request once.
         try:
-            jobs = await source.fetch(keyword, self._jobs_per_source)
+            found = await source.fetch(keyword, self._fetch_limit)
         except Exception as exc:
             self._report(self._health.record_failure(source.name, exc) if self._health else None)
             raise
-        log.info("%s returned %d jobs for %r", source.name, len(jobs), keyword)
+        # Rank before trimming, so a good match far down the site's list isn't cut off.
+        ranked = rank_jobs(found, keyword) if self._rank_results else found
+        jobs = ranked[: self._jobs_per_source]
+        log.info("%s returned %d jobs for %r; %d relevant, caching %d",
+                 source.name, len(found), keyword, len(ranked), len(jobs))
         self._storage.save_cached_jobs(key, jobs)
         self._report(self._health.record_success(source.name) if self._health else None)
         return jobs

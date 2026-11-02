@@ -23,6 +23,7 @@ NAME = "XpressJobs"
 SEARCH_URL = "https://xpress.jobs/api/jobs/searchJobs"
 JOB_URL = "https://xpress.jobs/jobs/view/{job_id}"
 SORT_BY = "ExpiryDateOnWebsite DESC"
+MAX_PAGE_SIZE = 100  # one modest request; the API filters by keyword itself
 
 _BOILERPLATE = re.compile(r"\s*please refer (to )?the job advert(isement)? for (further|more) (information|details)\.?", re.I)
 
@@ -102,7 +103,7 @@ class XpressJobsSource:
             SEARCH_URL,
             params={
                 "page": 1,
-                "pageSize": limit,
+                "pageSize": min(limit, MAX_PAGE_SIZE),
                 # The site's own frontend doubles single quotes before sending.
                 "keyword": keyword.replace("'", "''"),
                 "sortBy": SORT_BY,
