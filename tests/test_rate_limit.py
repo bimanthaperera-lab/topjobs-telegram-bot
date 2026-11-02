@@ -11,7 +11,6 @@ from jobbot.rate_limit import (
     RateLimiter,
     RateLimitExceeded,
     format_wait,
-    parse_admin_ids,
 )
 
 from .conftest import FakeSource, make_jobs, make_service
@@ -142,12 +141,6 @@ async def test_blocked_user_gets_partially_cached_results(storage, clock):
     assert result.first_page  # served from A's cache instead of refusing
     assert b.calls == 1
 
-
-def test_parse_admin_ids():
-    assert parse_admin_ids("") == frozenset()
-    assert parse_admin_ids("1, 2;3") == frozenset({1, 2, 3})
-    with pytest.raises(ValueError):
-        parse_admin_ids("abc")
 
 
 @pytest.mark.parametrize(("secs", "text"), [(1, "1 second"), (45, "45 seconds"), (61, "2 minutes"),

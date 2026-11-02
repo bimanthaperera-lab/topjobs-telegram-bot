@@ -39,6 +39,8 @@ def main() -> int:
         return 2
 
     setup_logging(settings.log_level, settings.secrets())
+    for warning in settings.warnings:
+        log.warning("Configuration: %s", warning)
 
     storage = Storage(settings.database_path)
     purged = storage.purge_old_sessions(SESSION_MAX_AGE_SECS)

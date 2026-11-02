@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 
 from dotenv import load_dotenv
 
-from .rate_limit import RateLimitConfig, parse_admin_ids
+from .rate_limit import RateLimitConfig
 from .sources.http import DEFAULT_USER_AGENT
 
 
@@ -32,6 +33,8 @@ class Settings:
     log_level: str = "INFO"
     health_port: int | None = None
     rate_limit: RateLimitConfig = field(default_factory=RateLimitConfig)
+    # Non-fatal problems found while loading, logged at startup.
+    warnings: tuple[str, ...] = ()
 
     @property
     def cache_ttl_secs(self) -> float:
@@ -93,6 +96,7 @@ def load_settings(env_file: str | None = ".env") -> Settings:
     xpressjobs_enabled = _bool("XPRESSJOBS_ENABLED", False)
     if not (topjobs_enabled or xpressjobs_enabled):
         raise ConfigError("Enable at least one job site: TOPJOBS_ENABLED or XPRESSJOBS_ENABLED.")
+    warnings: list[str] = []
     return Settings(
         telegram_bot_token=_required("TELEGRAM_BOT_TOKEN"),
         topjobs_enabled=topjobs_enabled,
@@ -114,14 +118,43 @@ def load_settings(env_file: str | None = ".env") -> Settings:
             searches_per_hour=_int("RATE_LIMIT_SEARCHES_PER_HOUR", 20, minimum=0),
             user_fetches_per_day=_int("RATE_LIMIT_USER_FETCHES_PER_DAY", 30, minimum=0),
             global_fetches_per_day=_int("RATE_LIMIT_GLOBAL_FETCHES_PER_DAY", 500, minimum=0),
-            admin_user_ids=_admin_ids(),
+            admin_user_ids=_admin_ids(warnings),
         ),
+        warnings=tuple(warnings),
     )
 
 
-def _admin_ids() -> frozenset[int]:
-    raw = os.getenv("ADMIN_USER_IDS", "")
-    try:
-        return parse_admin_ids(raw)
-    except ValueError as exc:
-        raise ConfigError("ADMIN_USER_IDS must be comma-separated numeric Telegram user IDs") from exc
+_BOT_TOKEN_SHAPE = re.compile(r"^\d{6,}:[A-Za-z0-9_-]{20,}$")
+
+
+def _admin_id_problem(entry: str) -> str:
+    """Why an entry isn't a user ID. Never includes the entry itself: it may be a secret."""
+    if _BOT_TOKEN_SHAPE.match(entry):
+        return "looks like a bot token, not a user ID"
+    if entry.startswith("@"):
+        return "is a @username; use the numeric ID from @userinfobot instead"
+    return "is not a number"
+
+
+def parse_admin_ids_lenient(raw: str | None) -> tuple[frozenset[int], list[str]]:
+    """Parse ADMIN_USER_IDS, keeping valid IDs and describing invalid entries.
+
+    Accepts commas, semicolons or spaces as separators and ignores quotes,
+    because values pasted into hosting dashboards often carry them.
+    """
+    ids: set[int] = set()
+    problems: list[str] = []
+    entries = [e.strip().strip("\"'[]") for e in re.split(r"[,;\s]+", raw or "")]
+    for position, entry in enumerate((e for e in entries if e), start=1):
+        if entry.isdigit():
+            ids.add(int(entry))
+        else:
+            problems.append(f"ADMIN_USER_IDS entry {position} {_admin_id_problem(entry)}; it was ignored.")
+    return frozenset(ids), problems
+
+
+def _admin_ids(warnings: list[str]) -> frozenset[int]:
+    # Optional setting: a typo here must not stop the bot, so warn instead of failing.
+    ids, problems = parse_admin_ids_lenient(os.getenv("ADMIN_USER_IDS", ""))
+    warnings.extend(problems)
+    return ids

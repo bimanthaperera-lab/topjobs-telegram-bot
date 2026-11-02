@@ -106,13 +106,6 @@ class RateLimiter:
         return self._storage.purge_rate_events(DAY)
 
 
-def parse_admin_ids(raw: str | None) -> frozenset[int]:
-    ids: set[int] = set()
-    for part in (raw or "").replace(";", ",").split(","):
-        part = part.strip()
-        if part:
-            ids.add(int(part))
-    return frozenset(ids)
 
 
 def format_wait(secs: int) -> str:
