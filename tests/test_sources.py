@@ -167,18 +167,18 @@ async def test_requests_to_same_host_are_spaced_out():
     assert sleeps == [2.0]
 
 
-async def test_xpressjobs_fetch_latest_pages_newest_first():
-    pages = []
+async def test_xpressjobs_fetch_newest_one_search_per_keyword():
+    seen = []
 
     def handler(request):
         params = dict(request.url.params)
-        pages.append(params)
-        start = 1000 - (int(params["page"]) - 1) * 100
-        count = 100 if params["page"] == "1" else 5  # the second page comes back short
-        return httpx.Response(200, json=[{"jobId": start - i, "jobTitle": f"Job {start - i}"} for i in range(count)])
+        seen.append(params)
+        base = 100 if params["keyword"] == "software" else 200
+        return httpx.Response(200, json=[{"jobId": base + i, "jobTitle": f"Job {base + i}"} for i in range(2)]
+                              + [{"jobId": 150, "jobTitle": "In both"}])
 
     http = PoliteHttpClient(mock_client(handler), 0)
-    jobs = await XpressJobsSource(http).fetch_latest(300)
-    assert [p["page"] for p in pages] == ["1", "2"]  # stopped at the short page
-    assert pages[0] == {"page": "1", "pageSize": "100", "keyword": "", "sortBy": "JobId DESC"}
-    assert len(jobs) == 105 and jobs[0].url.endswith("/1000") and jobs[-1].url.endswith("/896")
+    jobs = await XpressJobsSource(http).fetch_newest(["software", "o'neil"])
+    assert seen[0] == {"page": "1", "pageSize": "100", "keyword": "software", "sortBy": "JobId DESC"}
+    assert seen[1]["keyword"] == "o''neil"
+    assert [j.url.rsplit("/", 1)[1] for j in jobs] == ["201", "200", "150", "101", "100"]  # merged, newest first
