@@ -26,13 +26,15 @@ def telegram_length(text: str) -> int:
     return len(text.encode("utf-16-le")) // 2
 
 
-def format_job(job: Job, index: int | None = None, include_link: bool = True) -> str:
+def format_job(job: Job, index: int | None = None, include_link: bool = True, tag: str | None = None) -> str:
     """One job as HTML. Scraped text is escaped; missing fields are left out.
 
     include_link=False when the link is shown as an inline button instead.
+    tag: an optional first line, e.g. "🆕 New Match".
     """
     prefix = f"{index}. " if index is not None else ""
-    lines = [f"<b>{prefix}{escape(truncate(job.title, _TITLE_MAX))}</b>"]
+    head = [f"<b>{escape(tag)}</b>"] if tag else []
+    lines = head + [f"<b>{prefix}{escape(truncate(job.title, _TITLE_MAX))}</b>"]
     if job.company:
         lines.append(f"🏢 {escape(truncate(job.company, _FIELD_MAX))}")
     if job.location:
@@ -51,7 +53,7 @@ def format_job(job: Job, index: int | None = None, include_link: bool = True) ->
     block = "\n".join(lines)
     if telegram_length(block) > TELEGRAM_MAX_MESSAGE:
         # Pathological input (e.g. text that escapes to many entities): fall back to title + link.
-        block = "\n".join(x for x in (f"<b>{prefix}{escape(truncate(job.title, 100))}</b>", link) if x)
+        block = "\n".join(head + [x for x in (f"<b>{prefix}{escape(truncate(job.title, 100))}</b>", link) if x])
     return block
 
 

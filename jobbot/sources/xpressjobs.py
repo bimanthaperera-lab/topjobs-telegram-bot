@@ -3,6 +3,8 @@
 Search: GET /api/jobs/searchJobs?page=1&pageSize=N&keyword=<kw>&sortBy=ExpiryDateOnWebsite DESC
 returns a JSON array of jobs. The public sort options are by expiry date only,
 so results are re-sorted by jobId (assigned in posting order) to get newest first.
+The channel alerts (fetch_latest) instead ask for sortBy=JobId DESC with no
+keyword: the newest jobs on the whole site.
 
 XpressJobs' terms of use forbid scraping without permission, so this source is
 disabled by default (XPRESSJOBS_ENABLED=false). Enable it only once XpressJobs
@@ -24,6 +26,7 @@ SEARCH_URL = "https://xpress.jobs/api/jobs/searchJobs"
 JOB_URL = "https://xpress.jobs/jobs/view/{job_id}"
 SORT_BY = "ExpiryDateOnWebsite DESC"
 MAX_PAGE_SIZE = 100  # one modest request; the API filters by keyword itself
+LATEST_SORT_BY = "JobId DESC"  # not offered in the site's UI, but the API accepts it: newest first
 
 _BOILERPLATE = re.compile(r"\s*please refer (to )?the job advert(isement)? for (further|more) (information|details)\.?", re.I)
 
@@ -98,20 +101,36 @@ class XpressJobsSource:
     def __init__(self, http: PoliteHttpClient) -> None:
         self._http = http
 
-    async def fetch(self, keyword: str, limit: int) -> list[Job]:
+    async def _search(self, page: int, page_size: int, keyword: str, sort_by: str) -> list:
         response = await self._http.get(
             SEARCH_URL,
-            params={
-                "page": 1,
-                "pageSize": min(limit, MAX_PAGE_SIZE),
-                # The site's own frontend doubles single quotes before sending.
-                "keyword": keyword.replace("'", "''"),
-                "sortBy": SORT_BY,
-            },
+            params={"page": page, "pageSize": page_size, "keyword": keyword, "sortBy": sort_by},
             headers={"Accept": "application/json"},
         )
         try:
             data = response.json()
         except ValueError as exc:
             raise SourceError(f"{NAME}: response was not JSON") from exc
+        if not isinstance(data, list):
+            raise SourceError(f"{NAME}: unexpected response shape")
+        return data
+
+    async def fetch(self, keyword: str, limit: int) -> list[Job]:
+        # The site's own frontend doubles single quotes before sending.
+        data = await self._search(1, min(limit, MAX_PAGE_SIZE), keyword.replace("'", "''"), SORT_BY)
         return parse_search_response(data)[:limit]
+
+    async def fetch_latest(self, limit: int) -> list[Job]:
+        """The newest jobs on the whole site (every category), newest first.
+
+        For the channel alerts, which pick the software roles themselves. One
+        request per 100 jobs; stops early when a page comes back short.
+        """
+        page_size = min(limit, MAX_PAGE_SIZE)
+        items: list = []
+        for page in range(1, -(-limit // page_size) + 1):
+            batch = await self._search(page, page_size, "", LATEST_SORT_BY)
+            items.extend(batch)
+            if len(batch) < page_size:
+                break
+        return parse_search_response(items)[:limit]

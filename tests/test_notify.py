@@ -1,12 +1,16 @@
-"""Scheduled channel alerts for new software engineering jobs."""
+"""Scheduled channel posts: new jobs first, then the ranked pool with a repost cooldown."""
 
 import json
 from types import SimpleNamespace
 
 import pytest
 
+from jobbot.formatting import format_job
 from jobbot.models import Job
-from jobbot.notify import NotifySettings, is_software_job, load_seen, pick_new, run, save_seen
+from jobbot.notify import NotifySettings, is_software_job, load_state, run
+
+T0 = 1_800_000_000.0
+HOUR = 3600
 
 
 @pytest.mark.parametrize(
@@ -30,34 +34,74 @@ def test_software_job_filter(title, expected):
     assert is_software_job(title) is expected
 
 
-def job(n, title="Software Engineer"):
+@pytest.mark.parametrize(
+    ("title", "expected"),
+    [
+        ("Principal Engineer cum Team Lead (AI, Software)", True),
+        ("ML Engineer", True),
+        ("Associate UI/UX Engineer", True),
+        ("Software QA Engineer / Intern", True),
+        ("Quality Assurance Engineer", True),
+        ("Senior Lead - DevOps", True),
+        ("Civil Engineer", False),
+        ("Material Engineer | Seethawaka", False),
+        ("Procurement Engineer", False),
+        ("Quality Assurance Executive", False),
+        ("Technical Sales Engineer | Nawala", False),
+    ],
+)
+def test_site_wide_listing_needs_a_software_title(title, expected):
+    assert is_software_job(title, site_wide=True) is expected
+
+
+def test_tag_is_the_first_line():
+    text = format_job(Job(url="https://x.lk/1", title="Dev <1>"), tag="🆕 New Match")
+    assert text.startswith("<b>🆕 New Match</b>\n<b>Dev &lt;1&gt;</b>")
+
+
+def tj(n, title="Software Engineer"):
     return Job(url=f"https://x.lk/{n}", title=f"{title} {n}", source="TopJobs.lk")
 
 
-def test_pick_new_oldest_first_with_overflow():
-    jobs = [job(5), job(4), Job(url="https://x.lk/d", title="Designer"), job(3), job(2), job(1)]  # newest first
-    to_post, overflow = pick_new(jobs, seen=["https://x.lk/1"], limit=2)
-    assert [j.url for j in to_post] == ["https://x.lk/4", "https://x.lk/5"]  # newest ends up last
-    assert [j.url for j in overflow] == ["https://x.lk/3", "https://x.lk/2"]
+def xj(n, title="Software Engineer"):
+    return Job(url=f"https://xpress.jobs/jobs/view/{n}", title=f"{title} X{n}", source="XpressJobs")
 
 
-def test_state_file_round_trip(tmp_path):
-    path = str(tmp_path / "state" / "seen.json")
-    assert load_seen(path) is None
-    save_seen(path, ["a", "b"])
-    assert load_seen(path) == ["a", "b"]
+def newest_first(make, hi, lo=1):
+    return [make(n) for n in range(hi, lo - 1, -1)]
 
 
-class FakeSourceForNotify:
+class FakeTopJobs:
+    name = "TopJobs.lk"
+
     def __init__(self, jobs):
         self.jobs = jobs
-        self.name = "TopJobs.lk"
 
     async def fetch(self, keyword, limit):
         return list(self.jobs)
 
     async def fetch_image(self, url):
-        return None  # text posts keep this test simple
+        return None  # text posts keep these tests simple
+
+
+class FakeXpress:
+    """Like XpressJobsSource: fetch_latest, and no ad images."""
+
+    name = "XpressJobs"
+
+    def __init__(self, jobs=None, error=None):
+        self.jobs = jobs or []
+        self.error = error
+        self.latest_limit = None
+
+    async def fetch(self, keyword, limit):
+        raise AssertionError("the channel posts use fetch_latest")
+
+    async def fetch_latest(self, limit):
+        self.latest_limit = limit
+        if self.error:
+            raise self.error
+        return list(self.jobs)
 
 
 class ChannelBot:
@@ -72,50 +116,157 @@ class ChannelBot:
             raise Forbidden("bot is not a member of the channel chat")
         self.sent.append(SimpleNamespace(chat_id=chat_id, text=text, **kwargs))
 
+    def posts(self):
+        """[(title, tagged new)] in posting order."""
+        out = []
+        for m in self.sent:
+            lines = m.text.split("\n")
+            tagged = lines[0] == "<b>🆕 New Match</b>"
+            out.append((lines[1 if tagged else 0][3:-4], tagged))
+        return out
 
-def settings(tmp_path, max_per_run=15):
-    return NotifySettings(bot_token="x", chat_id="@itjobs", state_file=str(tmp_path / "seen.json"),
-                          max_per_run=max_per_run, send_images=True)
+
+def settings(tmp_path, **overrides):
+    return NotifySettings(bot_token="x", chat_id="@itjobs", state_file=str(tmp_path / "seen.json"), **overrides)
 
 
-async def test_first_run_only_records_and_announces(tmp_path):
+async def post(s, sources, now, **bot_kwargs):
+    bot = ChannelBot(**bot_kwargs)
+    status = await run(s, sources, bot, now=now)
+    return bot, status
+
+
+async def test_first_run_posts_the_top_five_untagged(tmp_path):
     s = settings(tmp_path)
-    bot = ChannelBot()
-    await run(s, FakeSourceForNotify([job(2), job(1), Job(url="https://x.lk/d", title="Designer")]), bot)
-    assert len(bot.sent) == 1 and "alerts are on" in bot.sent[0].text and "2 current" in bot.sent[0].text
-    assert sorted(json.load(open(s.state_file))) == ["https://x.lk/1", "https://x.lk/2"]
-
-
-async def test_posts_only_new_jobs_then_nothing(tmp_path):
-    s = settings(tmp_path)
-    save_seen(s.state_file, ["https://x.lk/1"])
-    bot = ChannelBot()
-    await run(s, FakeSourceForNotify([job(3), job(2), job(1)]), bot)
-    assert "2 new software engineering jobs" in bot.sent[0].text
-    assert [m.text.split("</b>")[0] for m in bot.sent[1:]] == ["<b>Software Engineer 2", "<b>Software Engineer 3"]
+    bot, status = await post(s, [FakeTopJobs(newest_first(tj, 8) + [tj(99, "Designer")])], T0)
+    assert status == 0
+    assert bot.posts() == [(f"Software Engineer {n}", False) for n in (8, 7, 6, 5, 4)]
     assert all(m.chat_id == "@itjobs" for m in bot.sent)
-
-    again = ChannelBot()
-    await run(s, FakeSourceForNotify([job(3), job(2), job(1)]), again)
-    assert again.sent == []
+    saved = json.load(open(s.state_file, encoding="utf-8"))
+    assert saved["version"] == 2 and "https://x.lk/99" not in saved["first_seen"]
 
 
-async def test_overflow_is_skipped_and_mentioned(tmp_path):
+async def test_ranked_titles_come_first(tmp_path):
+    s = settings(tmp_path, max_per_run=2)
+    jobs = [tj(3, "DevOps Lead"), tj(2, "QA Intern"), tj(1, "Senior Software Engineer")]
+    bot, _ = await post(s, [FakeTopJobs(jobs)], T0)
+    assert [t for t, _ in bot.posts()] == ["Senior Software Engineer 1", "DevOps Lead 3"]
+
+
+async def test_new_jobs_come_first_with_the_tag(tmp_path):
+    s = settings(tmp_path)
+    await post(s, [FakeTopJobs(newest_first(tj, 10))], T0)  # posts 10..6
+    bot, _ = await post(s, [FakeTopJobs(newest_first(tj, 11))], T0 + 6 * HOUR)
+    assert bot.posts() == [("Software Engineer 11", True)] + [(f"Software Engineer {n}", False) for n in (5, 4, 3, 2)]
+
+
+async def test_pool_rotates_then_waits_out_the_cooldown(tmp_path):
+    s = settings(tmp_path)
+    site = [FakeTopJobs(newest_first(tj, 25))]  # pool: the top 20 (25..6)
+    rounds = []
+    for hours in (0, 6, 12, 18):
+        bot, _ = await post(s, site, T0 + hours * HOUR)
+        rounds.append([t for t, _ in bot.posts()])
+    assert [r[0] for r in rounds] == ["Software Engineer 25", "Software Engineer 20",
+                                      "Software Engineer 15", "Software Engineer 10"]
+    assert sum(len(r) for r in rounds) == 20
+
+    quiet, _ = await post(s, site, T0 + 20 * HOUR)
+    assert quiet.sent == []  # every pool job went out in the last 24h: send nothing
+
+    next_day, _ = await post(s, site, T0 + 24 * HOUR)
+    assert [t for t, _ in next_day.posts()] == [f"Software Engineer {n}" for n in (25, 24, 23, 22, 21)]
+
+
+async def test_longer_cooldown(tmp_path):
+    s = settings(tmp_path, repost_hours=48)
+    site = [FakeTopJobs(newest_first(tj, 5))]
+    await post(s, site, T0)
+    bot, _ = await post(s, site, T0 + 24 * HOUR)
+    assert bot.sent == []
+    bot, _ = await post(s, site, T0 + 48 * HOUR)
+    assert len(bot.sent) == 5
+
+
+async def test_pool_is_ten_from_each_site(tmp_path):
+    s = settings(tmp_path, max_per_run=50)
+    xpress = FakeXpress(newest_first(xj, 15))
+    bot, _ = await post(s, [FakeTopJobs(newest_first(tj, 15)), xpress], T0)
+    titles = [t for t, _ in bot.posts()]
+    assert xpress.latest_limit == 300
+    assert titles[:4] == ["Software Engineer 15", "Software Engineer X15", "Software Engineer 14", "Software Engineer X14"]
+    assert sorted(titles) == sorted([f"Software Engineer {n}" for n in range(15, 5, -1)]
+                                    + [f"Software Engineer X{n}" for n in range(15, 5, -1)])
+
+
+async def test_new_jobs_beyond_the_run_wait_for_the_next(tmp_path):
+    s = settings(tmp_path, max_per_run=2)
+    await post(s, [FakeTopJobs([tj(1)])], T0)
+    site = [FakeTopJobs(newest_first(tj, 4))]
+    first, _ = await post(s, site, T0 + HOUR)
+    second, _ = await post(s, site, T0 + 2 * HOUR)
+    assert first.posts() == [("Software Engineer 4", True), ("Software Engineer 3", True)]
+    assert second.posts() == [("Software Engineer 2", True)]  # job 1 was posted within 24h
+
+
+async def test_new_tag_expires_after_48_hours(tmp_path):
     s = settings(tmp_path, max_per_run=1)
-    save_seen(s.state_file, [])
-    bot = ChannelBot()
-    await run(s, FakeSourceForNotify([job(3), job(2), job(1)]), bot)
-    assert "3 new" in bot.sent[0].text and "newest 1" in bot.sent[0].text
-    assert len(bot.sent) == 2
-    assert set(load_seen(s.state_file)) == {"https://x.lk/1", "https://x.lk/2", "https://x.lk/3"}
+    await post(s, [FakeTopJobs([tj(1)])], T0)
+    await post(s, [FakeTopJobs(newest_first(tj, 3))], T0 + HOUR)  # 3 posted as new; 2 waits
+    late = settings(tmp_path, max_per_run=3)
+    bot, _ = await post(late, [FakeTopJobs(newest_first(tj, 3))], T0 + 50 * HOUR)
+    assert bot.posts() == [(f"Software Engineer {n}", False) for n in (3, 2, 1)]
+
+
+async def test_site_switched_on_later_is_not_tagged_new(tmp_path):
+    s = settings(tmp_path)
+    await post(s, [FakeTopJobs(newest_first(tj, 3))], T0)
+    bot, _ = await post(s, [FakeTopJobs(newest_first(tj, 3)), FakeXpress([xj(9), xj(8)])], T0 + HOUR)
+    assert bot.posts() == [("Software Engineer X9", False), ("Software Engineer X8", False)]
+
+    later, _ = await post(s, [FakeTopJobs(newest_first(tj, 3)), FakeXpress([xj(10), xj(9), xj(8)])], T0 + 2 * HOUR)
+    assert later.posts() == [("Software Engineer X10", True)]
+
+
+async def test_older_state_file_is_upgraded(tmp_path):
+    s = settings(tmp_path)
+    with open(s.state_file, "w", encoding="utf-8") as fh:
+        json.dump(["https://x.lk/1"], fh)  # the old format: URLs already posted
+    bot, _ = await post(s, [FakeTopJobs([tj(2), tj(1)])], T0)
+    assert bot.posts() == [("Software Engineer 2", True), ("Software Engineer 1", False)]
+    assert load_state(s.state_file, T0).posted == {"https://x.lk/2": T0, "https://x.lk/1": T0}
+
+
+async def test_one_site_failing_still_posts_the_other(tmp_path):
+    from jobbot.sources import SourceError
+
+    s = settings(tmp_path)
+    bot, status = await post(s, [FakeTopJobs([tj(2), tj(1)]), FakeXpress(error=SourceError("xpress.jobs: HTTP 503"))], T0)
+    assert status == 1  # the run shows red so the failure gets noticed
+    assert [t for t, _ in bot.posts()] == ["Software Engineer 2", "Software Engineer 1"]
+
+
+async def test_every_site_failing_raises(tmp_path):
+    from jobbot.sources import SourceError
+
+    with pytest.raises(SourceError):
+        await post(settings(tmp_path), [FakeXpress(error=SourceError("down"))], T0)
 
 
 async def test_partial_failure_keeps_what_was_posted(tmp_path):
     from telegram.error import Forbidden
 
     s = settings(tmp_path)
-    save_seen(s.state_file, [])
-    bot = ChannelBot(fail_after=2)  # header + first job succeed, then the channel refuses
     with pytest.raises(Forbidden):
-        await run(s, FakeSourceForNotify([job(3), job(2), job(1)]), bot)
-    assert load_seen(s.state_file) == ["https://x.lk/1"]  # only the posted one; others retried next run
+        await post(s, [FakeTopJobs(newest_first(tj, 5))], T0, fail_after=2)
+    assert set(load_state(s.state_file, T0).posted) == {"https://x.lk/5", "https://x.lk/4"}
+
+
+async def test_gone_jobs_are_forgotten_after_a_month(tmp_path):
+    s = settings(tmp_path)
+    await post(s, [FakeTopJobs([tj(2), tj(1)])], T0)
+    await post(s, [FakeTopJobs([tj(2)])], T0 + 10 * 24 * HOUR)
+    assert "https://x.lk/1" in load_state(s.state_file, T0).first_seen  # a site glitch doesn't reset it
+    await post(s, [FakeTopJobs([tj(2)])], T0 + 31 * 24 * HOUR)
+    state = load_state(s.state_file, T0)
+    assert "https://x.lk/1" not in state.first_seen and "https://x.lk/1" not in state.posted

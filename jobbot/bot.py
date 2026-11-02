@@ -243,13 +243,15 @@ def job_keyboard(job: Job) -> InlineKeyboardMarkup | None:
     return InlineKeyboardMarkup([[InlineKeyboardButton(label, url=job.url)]])
 
 
-async def send_job(bot, chat_id: int, job: Job, index: int, images: JobImages | None = None) -> None:
+async def send_job(bot, chat_id: int, job: Job, index: int, images: JobImages | None = None,
+                   tag: str | None = None) -> None:
     """One job per message: the ad image with the details as its caption when there is one,
-    otherwise a text message; the link is an inline button under it either way."""
+    otherwise a text message; the link is an inline button under it either way.
+    tag: an optional first line, e.g. "🆕 New Match"."""
     keyboard = job_keyboard(job)
     photo = await images.photo_for(job) if images is not None else None
     if photo is not None:
-        caption = format_job(job, index, include_link=keyboard is None)
+        caption = format_job(job, index, include_link=keyboard is None, tag=tag)
         if telegram_length(caption) <= TELEGRAM_MAX_CAPTION:
             try:
                 sent = await bot.send_photo(chat_id, photo, caption=caption,
@@ -261,14 +263,14 @@ async def send_job(bot, chat_id: int, job: Job, index: int, images: JobImages | 
                 log.warning("Photo for %s rejected (%s); sending text instead", job.url, exc)
     if keyboard is not None:
         try:
-            await bot.send_message(chat_id, format_job(job, index, include_link=False),
+            await bot.send_message(chat_id, format_job(job, index, include_link=False, tag=tag),
                                    parse_mode=ParseMode.HTML, link_preview_options=_NO_PREVIEW,
                                    reply_markup=keyboard)
             return
         except BadRequest as exc:
             # Telegram rejects some URLs as buttons; fall back to a text link.
             log.warning("Job button rejected (%s); sending a text link instead", exc)
-    await bot.send_message(chat_id, format_job(job, index, include_link=True),
+    await bot.send_message(chat_id, format_job(job, index, include_link=True, tag=tag),
                            parse_mode=ParseMode.HTML, link_preview_options=_NO_PREVIEW)
 
 
