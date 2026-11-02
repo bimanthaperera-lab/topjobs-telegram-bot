@@ -1,6 +1,6 @@
-# Posts software engineering jobs to a Telegram channel four times a day, 5 per run:
-# new jobs first (tagged "🆕 New Match"), then the top-ranked jobs not posted in the
-# last 24 hours. See jobbot/notify.py.
+# Posts IT jobs to a Telegram channel four times a day, 5 per site per run (TopJobs 5,
+# XpressJobs 5): new jobs first (tagged "🆕 New Match"), then the newest jobs not posted
+# in the last 24 hours. See jobbot/notify.py.
 #
 # Needs two repository secrets (Settings -> Secrets and variables -> Actions):
 #   TELEGRAM_BOT_TOKEN  the bot's token
@@ -48,7 +48,7 @@ jobs:
           key: notify-state-${{ github.run_id }}
           restore-keys: notify-state-
 
-      - name: Post software engineering jobs
+      - name: Post IT jobs
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           NOTIFY_CHAT_ID: ${{ secrets.NOTIFY_CHAT_ID }}

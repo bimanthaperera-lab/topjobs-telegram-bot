@@ -3,8 +3,8 @@
 Search: GET /api/jobs/searchJobs?page=1&pageSize=N&keyword=<kw>&sortBy=ExpiryDateOnWebsite DESC
 returns a JSON array of jobs. The public sort options are by expiry date only,
 so results are re-sorted by jobId (assigned in posting order) to get newest first.
-The channel alerts (fetch_latest) instead ask for sortBy=JobId DESC with no
-keyword: the newest jobs on the whole site.
+The channel alerts (fetch_newest) instead ask for sortBy=JobId DESC, which
+the API accepts: the newest matches first.
 
 XpressJobs' terms of use forbid scraping without permission, so this source is
 disabled by default (XPRESSJOBS_ENABLED=false). Enable it only once XpressJobs
@@ -14,6 +14,7 @@ has given written permission.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
 
@@ -120,17 +121,13 @@ class XpressJobsSource:
         data = await self._search(1, min(limit, MAX_PAGE_SIZE), keyword.replace("'", "''"), SORT_BY)
         return parse_search_response(data)[:limit]
 
-    async def fetch_latest(self, limit: int) -> list[Job]:
-        """The newest jobs on the whole site (every category), newest first.
+    async def fetch_newest(self, keywords: Sequence[str]) -> list[Job]:
+        """The newest jobs matching any of the keywords, newest first, without duplicates.
 
-        For the channel alerts, which pick the software roles themselves. One
-        request per 100 jobs; stops early when a page comes back short.
+        For the channel alerts, which pick the software roles themselves: one
+        request per keyword, each the newest MAX_PAGE_SIZE matches.
         """
-        page_size = min(limit, MAX_PAGE_SIZE)
         items: list = []
-        for page in range(1, -(-limit // page_size) + 1):
-            batch = await self._search(page, page_size, "", LATEST_SORT_BY)
-            items.extend(batch)
-            if len(batch) < page_size:
-                break
-        return parse_search_response(items)[:limit]
+        for keyword in keywords:
+            items.extend(await self._search(1, MAX_PAGE_SIZE, keyword.replace("'", "''"), LATEST_SORT_BY))
+        return parse_search_response(items)
