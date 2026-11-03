@@ -11,7 +11,7 @@ from html import escape
 
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions, Update
 from telegram.constants import ChatAction, ParseMode
-from telegram.error import BadRequest, TelegramError
+from telegram.error import BadRequest, Forbidden, NetworkError, TelegramError
 from telegram.ext import (
     Application,
     AIORateLimiter,
@@ -47,6 +47,8 @@ log = logging.getLogger(__name__)
 SHOW_MORE_LABEL = "Thawa Jobs Pennanna (Show More)"
 JOB_BUTTON_LABEL = "🔗 View & Apply"
 MAX_BUTTON_URL = 2000
+# Telegram downloads a photo URL itself before it answers; the default 5s is often too short.
+PHOTO_READ_TIMEOUT_SECS = 30
 CALLBACK_PREFIX = "more:"
 CATEGORY_PREFIX = "cat:"
 CATEGORY_COLUMNS = 2
@@ -342,12 +344,16 @@ def job_keyboard(job: Job) -> InlineKeyboardMarkup | None:
 
 async def _send_photo(bot, chat_id: int, job: Job, photo: str | bytes, caption: str,
                       keyboard: InlineKeyboardMarkup | None):
-    """The sent message, or None if Telegram rejected the photo."""
+    """The sent message, or None if Telegram rejected the photo or didn't answer in time."""
     try:
         return await bot.send_photo(chat_id, photo, caption=caption, parse_mode=ParseMode.HTML,
-                                    reply_markup=keyboard)
+                                    reply_markup=keyboard, read_timeout=PHOTO_READ_TIMEOUT_SECS)
     except BadRequest as exc:
         log.warning("Photo for %s rejected (%s)", job.url, exc)
+        return None
+    except NetworkError as exc:
+        # e.g. Telegram still fetching the URL at the timeout: send the job without this photo.
+        log.warning("Photo for %s not sent (%s)", job.url, exc)
         return None
 
 
@@ -410,7 +416,13 @@ async def send_jobs(bot, chat_id: int, jobs: list[Job], start_index: int, images
     lookups = start_photo_lookups(images, jobs)
     try:
         for offset, (job, photo) in enumerate(zip(jobs, lookups)):
-            await send_job(bot, chat_id, job, start_index + offset, images, photo=photo)
+            try:
+                await send_job(bot, chat_id, job, start_index + offset, images, photo=photo)
+            except Forbidden:
+                raise  # the user blocked the bot: nothing more will get through
+            except TelegramError:
+                # One job that can't be sent must not cost the user the rest of the page.
+                log.warning("Could not send %s; sending the next job", job.url, exc_info=True)
     finally:
         cancel_photo_lookups(lookups)
 
