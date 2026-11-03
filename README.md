@@ -1,7 +1,8 @@
 # Sri Lanka IT & Software Jobs Telegram Bot
 
 A Telegram bot for **IT and software jobs** in Sri Lanka. It reads **TopJobs.lk** (and
-**XpressJobs**, once it's enabled) directly, with no Apify or any other paid scraping service.
+**XpressJobs**, once it's enabled) directly, with no Apify or any other paid scraping service
+(except, optionally, ZenRows for XpressJobs, which blocks GitHub's IPs: `ZENROWS_API_KEY`).
 - **Search:** each job arrives as its **ad image**, with the details as the caption and a
   **🔗 View & Apply** button. Each search sends 5 jobs, and **Thawa Jobs Pennanna (Show More)**
   sends the rest.
@@ -134,6 +135,7 @@ token redaction.
 | `TOPJOBS_CATEGORY` | `SDQ` | TopJobs category to search within (SDQ = IT software). Set it empty to search all jobs by keyword |
 | `SEND_JOB_IMAGES` | true | Send each job's ad image as a photo |
 | `XPRESSJOBS_ENABLED` | **false** | Search XpressJobs. Turn on only with their permission |
+| `ZENROWS_API_KEY` | unset | Send XpressJobs requests through ZenRows (XpressJobs blocks GitHub's IPs) |
 | `SCRAPE_MIN_INTERVAL_SECS` | 2 | Minimum gap between requests to the same site, across all users |
 | `HTTP_TIMEOUT_SECS` | 20 | Request timeout |
 | `HTTP_RETRIES` | 2 | Retries for timeouts and 5xx errors, waiting 2s, then 4s |
@@ -266,8 +268,8 @@ may start scheduled runs a few minutes late. Each run:
    which keeps civil engineers, security guards and AC technicians out. A vacancy listed twice is
    posted once.
 3. **Posts up to 5 jobs from each site** (5 + 5 with both on), each as its own message (the ad
-   image with the **View & Apply** button; XpressJobs has no ad images, so its jobs are text with
-   the same button):
+   image with the **View & Apply** button; XpressJobs has no ad images, so its jobs come with the
+   company logo and a short description, or as text when there's no logo):
    - **New jobs first**, tagged **🆕 New Match**: jobs that appeared since the alerts started and
      haven't been posted yet. More than 5 new on a site? The rest go first in the next run. A job
      stays "new" for 48 hours. Both sites' new jobs are posted before any older job.

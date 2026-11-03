@@ -5,6 +5,7 @@
 # Needs two repository secrets (Settings -> Secrets and variables -> Actions):
 #   TELEGRAM_BOT_TOKEN  the bot's token
 #   NOTIFY_CHAT_ID      the channel: "@channelname" or its numeric id (-100...)
+#   ZENROWS_API_KEY     (optional) XpressJobs blocks GitHub's IPs; its requests then go through ZenRows
 # The bot must be an admin of the channel with permission to post messages.
 # Optional repository variable (Variables tab, same page):
 #   XPRESSJOBS_ENABLED   "true" to also post XpressJobs' jobs. Only with XpressJobs' permission.
@@ -55,6 +56,7 @@ jobs:
           NOTIFY_CHAT_ID: ${{ secrets.NOTIFY_CHAT_ID }}
           NOTIFY_STATE_FILE: .notify-state/seen.json
           XPRESSJOBS_ENABLED: ${{ vars.XPRESSJOBS_ENABLED }}
+          ZENROWS_API_KEY: ${{ secrets.ZENROWS_API_KEY }}
           NOTIFY_REPOST_HOURS: ${{ vars.NOTIFY_REPOST_HOURS }}
         run: python -m jobbot.notify
 

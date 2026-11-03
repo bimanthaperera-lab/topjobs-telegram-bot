@@ -73,11 +73,13 @@ XPRESS_ITEMS = [
     {"jobId": 345276, "jobTitle": "Accountant", "organizationName": "Tradlanka",
      "overview": "A minimum of 5 years experience. Please refer to the job advert for further information.",
      "createdDate": None, "expiryDateOnWebsite": "2026-11-06T01:58:11.077", "jobType": "Full-Time",
-     "locations": " Colombo, Western Province", "archived": False},
+     "locations": " Colombo, Western Province", "archived": False,
+     "hasLogo": True, "logoImageUrl": "https://cdn.xpress.jobs/Organizations/logo_1.jpg"},
     {"jobId": 348657, "jobTitle": "Junior Accountant", "organizationName": "SN Travel",
      "overview": "Please refer to the job advert for further information.",
      "createdDate": "2026-11-01T09:00:00", "expiryDateOnWebsite": "2026-11-16T00:00:00",
-     "jobType": "Full-Time", "locations": "Colombo", "archived": False},
+     "jobType": "Full-Time", "locations": "Colombo", "archived": False,
+     "hasLogo": False, "logoImageUrl": None},
     {"jobId": 300000, "jobTitle": "Old", "archived": True},
     {"jobId": "bad", "jobTitle": "Bad id"},
     {"jobId": 340000, "jobTitle": ""},
@@ -95,6 +97,8 @@ def test_xpressjobs_maps_and_sorts_newest_first():
     assert older.location == "Colombo, Western Province"
     assert older.posted is None
     assert older.source == "XpressJobs"
+    assert older.logo_url == "https://cdn.xpress.jobs/Organizations/logo_1.jpg"
+    assert newest.logo_url is None
 
 
 def test_xpressjobs_rejects_unexpected_shape():
@@ -137,6 +141,24 @@ async def test_xpressjobs_fetch_params():
     assert len(jobs) == 2
     assert seen["params"] == {"page": "1", "pageSize": "30", "keyword": "o''neil",
                               "sortBy": "ExpiryDateOnWebsite DESC"}
+
+
+async def test_xpressjobs_through_zenrows():
+    seen = {}
+
+    def handler(request):
+        seen["url"] = request.url
+        return httpx.Response(200, json=XPRESS_ITEMS)
+
+    http = PoliteHttpClient(mock_client(handler), 0)
+    jobs = await XpressJobsSource(http, zenrows_api_key="KEY").fetch("o'neil", limit=30)
+    assert len(jobs) == 2
+    assert seen["url"].host == "api.zenrows.com"
+    assert seen["url"].params["apikey"] == "KEY"
+    target = httpx.URL(seen["url"].params["url"])
+    assert str(target.copy_with(query=None)) == "https://xpress.jobs/api/jobs/searchJobs"
+    assert dict(target.params) == {"page": "1", "pageSize": "30", "keyword": "o''neil",
+                                   "sortBy": "ExpiryDateOnWebsite DESC"}
 
 
 async def test_http_errors_become_source_errors():
