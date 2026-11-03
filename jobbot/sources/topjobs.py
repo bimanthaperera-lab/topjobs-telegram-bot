@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from urllib.parse import quote, urlencode, urljoin
 
 from bs4 import BeautifulSoup
@@ -109,6 +110,17 @@ def find_ad_image_url(html: str, page_url: str) -> str | None:
     return url if url.lower().startswith(("https://", "http://")) else None
 
 
+def fresh_image_url(url: str, now: float | None = None) -> str:
+    """The image URL with a query TopJobs ignores, so Telegram fetches the image again.
+
+    Telegram caches what it got for a photo URL and reuses it: once it had the
+    topjobs logo for a job's image URL, every later send showed the logo instead
+    of the ad. A new URL each time makes it fetch the real image.
+    """
+    stamp = int(time.time() if now is None else now)
+    return f"{url}{'&' if '?' in url else '?'}v={stamp}"
+
+
 class TopJobsSource:
     name = NAME
     sorted_newest_first = True
@@ -138,7 +150,8 @@ class TopJobsSource:
         rather than like a separate search.
         """
         page = await self._http.get(job_url, min_interval=IMAGE_REQUEST_GAP_SECS)
-        return await asyncio.to_thread(find_ad_image_url, page.text, str(page.url))
+        url = await asyncio.to_thread(find_ad_image_url, page.text, str(page.url))
+        return fresh_image_url(url) if url else None
 
     async def download_image(self, image_url: str) -> bytes | None:
         """The image itself, for when Telegram can't fetch its URL on its own."""

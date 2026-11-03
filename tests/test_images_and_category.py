@@ -1,6 +1,7 @@
 """IT-category search, job ad images (download once, reuse Telegram file_id)."""
 
 import asyncio
+import re
 from types import SimpleNamespace
 
 import httpx
@@ -12,7 +13,7 @@ from jobbot.images import NO_IMAGE_RECHECK_SECS, JobImages, Photo
 from jobbot.models import Job
 from jobbot.sources import SourceError
 from jobbot.sources.http import PoliteHttpClient
-from jobbot.sources.topjobs import TopJobsSource, find_ad_image_url
+from jobbot.sources.topjobs import TopJobsSource, find_ad_image_url, fresh_image_url
 
 from .conftest import FakeSource, make_jobs, make_service
 
@@ -60,8 +61,16 @@ async def test_ad_image_url_needs_only_the_job_page():
         return httpx.Response(200, text=JOB_PAGE)
 
     url = await TopJobsSource(client(handler)).ad_image_url(JOB_URL)
-    assert url == "https://www.topjobs.lk/logo/DEFZZZ/1657c1255.png"
+    assert re.fullmatch(r"https://www\.topjobs\.lk/logo/DEFZZZ/1657c1255\.png\?v=\d+", url)
     assert requested == ["/employer/JobAdvertismentServlet"]
+
+
+def test_fresh_image_url_makes_telegram_fetch_again():
+    # Telegram reuses what it once got for a URL (it had cached the topjobs logo for an ad).
+    url = "https://www.topjobs.lk/logo/DEFZZZ/3047cUW9.png"
+    assert fresh_image_url(url, now=100) == f"{url}?v=100"
+    assert fresh_image_url(url, now=100) != fresh_image_url(url, now=101)
+    assert fresh_image_url(f"{url}?a=1", now=5) == f"{url}?a=1&v=5"
 
 
 async def test_download_image():
