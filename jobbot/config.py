@@ -25,6 +25,7 @@ class Settings:
     topjobs_category: str | None = "SDQ"
     send_job_images: bool = True
     xpressjobs_enabled: bool = False  # needs XpressJobs' permission; see sources/xpressjobs.py
+    zenrows_api_key: str | None = None  # send XpressJobs requests through ZenRows
     http_timeout_secs: int = 20
     scrape_min_interval_secs: float = 2.0
     http_retries: int = 2
@@ -49,7 +50,7 @@ class Settings:
 
     def secrets(self) -> list[str]:
         """Values that must never appear in logs."""
-        return [s for s in (self.telegram_bot_token,) if s]
+        return [s for s in (self.telegram_bot_token, self.zenrows_api_key) if s]
 
 
 def _required(name: str) -> str:
@@ -111,6 +112,7 @@ def load_settings(env_file: str | None = ".env") -> Settings:
         topjobs_category=_category(),
         send_job_images=_bool("SEND_JOB_IMAGES", True),
         xpressjobs_enabled=xpressjobs_enabled,
+        zenrows_api_key=os.getenv("ZENROWS_API_KEY", "").strip() or None,
         http_timeout_secs=_int("HTTP_TIMEOUT_SECS", 20, minimum=5),
         scrape_min_interval_secs=_float("SCRAPE_MIN_INTERVAL_SECS", 2.0),
         http_retries=_int("HTTP_RETRIES", 2, minimum=0),

@@ -31,7 +31,7 @@ def build_sources(settings: Settings, http: PoliteHttpClient) -> list[JobSource]
     if settings.topjobs_enabled:
         sources.append(TopJobsSource(http, category=settings.topjobs_category))
     if settings.xpressjobs_enabled:
-        sources.append(XpressJobsSource(http))
+        sources.append(XpressJobsSource(http, settings.zenrows_api_key))
     return sources
 
 

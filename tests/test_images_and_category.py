@@ -134,6 +134,21 @@ async def test_images_disabled_or_unsupported_source(storage):
     assert await JobImages(storage, [FakeSource("Site A")]).photo_for(JOB) is None
 
 
+LOGO = "https://cdn.example.lk/logo_1.jpg"
+
+
+async def test_logo_used_when_there_is_no_ad_image(storage):
+    job = Job(url="https://x.lk/1", title="Dev", source="Site A", logo_url=LOGO)
+    assert await JobImages(storage, [FakeSource("Site A")]).photo_for(job) == LOGO
+    assert await JobImages(storage, [ImageSource(image=None)]).photo_for(job) == LOGO
+    assert await JobImages(storage, [ImageSource()], enabled=False).photo_for(job) is None
+
+
+async def test_ad_image_preferred_over_logo(storage):
+    job = Job(url="https://x.lk/1", title="Dev", source="Site A", logo_url=LOGO)
+    assert await JobImages(storage, [ImageSource()]).photo_for(job) == b"img"
+
+
 # --- sending a job as a photo ------------------------------------------------------------
 
 class PhotoBot:
@@ -163,6 +178,17 @@ async def test_job_sent_as_photo_with_caption_and_button(storage):
     assert msg.reply_markup.inline_keyboard[0][0].url == "https://x.lk/1"
     # The largest size's file_id is stored for reuse.
     assert storage.get_job_photo("https://x.lk/1")[0] == "BIG"
+
+
+async def test_job_sent_with_logo_and_short_description(storage):
+    bot = PhotoBot()
+    job = Job(url="https://x.lk/1", title="Dev", description="Full-Time. " + "D" * 400,
+              source="Site A", logo_url=LOGO)
+    await send_job(bot, 42, job, 1, JobImages(storage, [FakeSource("Site A")]))
+    (msg,) = bot.sent
+    assert msg.kind == "photo" and msg.photo == LOGO
+    assert "📝 Full-Time. DDD" in msg.caption and msg.caption.endswith("…")
+    assert storage.get_job_photo("https://x.lk/1") is None  # a logo isn't the job's ad image
 
 
 async def test_rejected_photo_falls_back_to_text(storage):

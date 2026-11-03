@@ -4,6 +4,10 @@ TopJobs publishes the real job description as an image on the job page. The
 first time a job is sent, its image is downloaded and uploaded to Telegram;
 Telegram's file_id is then stored, so every later send (any user) reuses it
 without touching the site again.
+
+A job without an ad image (XpressJobs has none) is sent with its company logo
+instead, when the site gives one: its URL is passed to Telegram, which
+downloads it itself.
 """
 
 from __future__ import annotations
@@ -28,9 +32,13 @@ class JobImages:
         self._enabled = enabled
 
     async def photo_for(self, job: Job) -> str | bytes | None:
-        """A Telegram file_id (already uploaded), image bytes (upload them), or None."""
+        """A Telegram file_id (already uploaded), image bytes (upload them), a logo URL, or None."""
         if not self._enabled:
             return None
+        ad_image = await self._ad_image(job)
+        return ad_image if ad_image is not None else job.logo_url
+
+    async def _ad_image(self, job: Job) -> str | bytes | None:
         known = self._storage.get_job_photo(job.url)
         if known is not None:
             file_id, checked_at = known

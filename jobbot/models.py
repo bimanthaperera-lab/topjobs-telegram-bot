@@ -15,6 +15,7 @@ class Job:
     description: str | None = None
     closing: str | None = None
     source: str | None = None  # display name of the site, e.g. "TopJobs.lk"
+    logo_url: str | None = None  # the company logo, sent when the job has no ad image
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -30,4 +31,5 @@ class Job:
             description=data.get("description"),
             closing=data.get("closing"),
             source=data.get("source"),
+            logo_url=data.get("logo_url"),
         )

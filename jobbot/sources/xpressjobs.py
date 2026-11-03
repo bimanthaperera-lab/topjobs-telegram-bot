@@ -9,6 +9,11 @@ the API accepts: the newest matches first.
 XpressJobs' terms of use forbid scraping without permission, so this source is
 disabled by default (XPRESSJOBS_ENABLED=false). Enable it only once XpressJobs
 has given written permission.
+
+XpressJobs blocks GitHub Actions' IP addresses and asked for requests to go
+through ZenRows instead: with ZENROWS_API_KEY set, every request is sent to the
+ZenRows API (GET https://api.zenrows.com/v1/?apikey=...&url=<the API URL>),
+which fetches the URL and returns XpressJobs' answer unchanged.
 """
 
 from __future__ import annotations
@@ -17,6 +22,7 @@ import re
 from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
+from urllib.parse import urlencode
 
 from ..models import Job
 from . import SourceError
@@ -28,6 +34,7 @@ JOB_URL = "https://xpress.jobs/jobs/view/{job_id}"
 SORT_BY = "ExpiryDateOnWebsite DESC"
 MAX_PAGE_SIZE = 100  # one modest request; the API filters by keyword itself
 LATEST_SORT_BY = "JobId DESC"  # not offered in the site's UI, but the API accepts it: newest first
+ZENROWS_URL = "https://api.zenrows.com/v1/"
 
 _BOILERPLATE = re.compile(r"\s*please refer (to )?the job advert(isement)? for (further|more) (information|details)\.?", re.I)
 
@@ -60,6 +67,11 @@ def _description(item: dict) -> str | None:
     return overview or job_type
 
 
+def _logo(item: dict) -> str | None:
+    url = _clean(item.get("logoImageUrl")) if item.get("hasLogo") else None
+    return url if url and url.lower().startswith("https://") else None
+
+
 def map_job(item: Any) -> Job | None:
     if not isinstance(item, dict) or item.get("archived"):
         return None
@@ -76,6 +88,7 @@ def map_job(item: Any) -> Job | None:
         closing=_date(item.get("expiryDateOnWebsite")),
         description=_description(item),
         source=NAME,
+        logo_url=_logo(item),
     )
 
 
@@ -99,15 +112,17 @@ class XpressJobsSource:
     name = NAME
     sorted_newest_first = True
 
-    def __init__(self, http: PoliteHttpClient) -> None:
+    def __init__(self, http: PoliteHttpClient, zenrows_api_key: str | None = None) -> None:
         self._http = http
+        self._zenrows_api_key = zenrows_api_key or None
 
     async def _search(self, page: int, page_size: int, keyword: str, sort_by: str) -> list:
-        response = await self._http.get(
-            SEARCH_URL,
-            params={"page": page, "pageSize": page_size, "keyword": keyword, "sortBy": sort_by},
-            headers={"Accept": "application/json"},
-        )
+        params = {"page": page, "pageSize": page_size, "keyword": keyword, "sortBy": sort_by}
+        if self._zenrows_api_key:
+            target = f"{SEARCH_URL}?{urlencode(params)}"
+            response = await self._http.get(ZENROWS_URL, params={"apikey": self._zenrows_api_key, "url": target})
+        else:
+            response = await self._http.get(SEARCH_URL, params=params, headers={"Accept": "application/json"})
         try:
             data = response.json()
         except ValueError as exc:

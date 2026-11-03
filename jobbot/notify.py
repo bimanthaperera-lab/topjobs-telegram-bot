@@ -20,7 +20,8 @@ up to NOTIFY_PER_SITE (5) jobs from each site, so 5 + 5 with both on:
 
 The new jobs of both sites go out first, then the pool jobs. Each job is the ad
 image with the details as its caption and a "View & Apply" button; XpressJobs
-has no ad images, so its jobs are posted as text with the same button.
+has no ad images, so its jobs are posted with the company logo (or as text when
+there's none) and the same button.
 
 What was seen and posted is kept in NOTIFY_STATE_FILE (JSON), carried between
 runs by the Actions cache. Jobs already listed when tracking starts, or when
@@ -36,6 +37,7 @@ Settings (environment):
     NOTIFY_REPOST_HOURS  default unset: a posted job is never posted again
     SEND_JOB_IMAGES      default true
     XPRESSJOBS_ENABLED   default false; only with XpressJobs' permission
+    ZENROWS_API_KEY      default unset; set: XpressJobs requests go through ZenRows
 """
 
 from __future__ import annotations
@@ -121,6 +123,7 @@ class NotifySettings:
     per_site: int = 5
     send_images: bool = True
     xpressjobs_enabled: bool = False
+    zenrows_api_key: str | None = None
     pool_size: int = 20
     repost_hours: int | None = None  # None: a posted job is never posted again
 
@@ -133,6 +136,7 @@ def load_notify_settings() -> NotifySettings:
         per_site=_int("NOTIFY_PER_SITE", 5, minimum=1),
         send_images=_bool("SEND_JOB_IMAGES", True),
         xpressjobs_enabled=_bool("XPRESSJOBS_ENABLED", False),
+        zenrows_api_key=os.getenv("ZENROWS_API_KEY", "").strip() or None,
         pool_size=_int("NOTIFY_POOL_SIZE", 20, minimum=1),
         repost_hours=(_int("NOTIFY_REPOST_HOURS", 0, minimum=0)
                       if os.getenv("NOTIFY_REPOST_HOURS", "").strip() else None),
@@ -349,12 +353,12 @@ async def main_async() -> int:
     except ConfigError as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
         return 2
-    setup_logging(os.getenv("LOG_LEVEL", "INFO"), [settings.bot_token])
+    setup_logging(os.getenv("LOG_LEVEL", "INFO"), [settings.bot_token, settings.zenrows_api_key or ""])
 
     http = PoliteHttpClient(build_http_client(20), 2.0)
     sources: list[JobSource] = [TopJobsCategories(http)]
     if settings.xpressjobs_enabled:
-        sources.append(XpressJobsSource(http))
+        sources.append(XpressJobsSource(http, settings.zenrows_api_key))
     bot = ExtBot(settings.bot_token, rate_limiter=AIORateLimiter(max_retries=3))
     try:
         async with bot:
