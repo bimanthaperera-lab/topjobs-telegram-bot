@@ -8,7 +8,7 @@ import pytest
 from jobbot.sources import SourceError
 from jobbot.sources.http import PoliteHttpClient
 from jobbot.sources.topjobs import TopJobsSource, parse_search_page
-from jobbot.sources.xpressjobs import XpressJobsSource, parse_search_response
+from jobbot.sources.xpressjobs import XpressJobsSource, ZenRowsLimitError, parse_search_response
 
 # Trimmed copy of a real TopJobs.lk results row structure.
 TOPJOBS_ROW = """
@@ -159,6 +159,29 @@ async def test_xpressjobs_through_zenrows():
     assert str(target.copy_with(query=None)) == "https://xpress.jobs/api/jobs/searchJobs"
     assert dict(target.params) == {"page": "1", "pageSize": "30", "keyword": "o''neil",
                                    "sortBy": "ExpiryDateOnWebsite DESC"}
+
+
+@pytest.mark.parametrize("status", [402, 429])
+async def test_zenrows_limit_is_its_own_error(status):
+    calls = []
+
+    def handler(request):
+        calls.append(request.url.host)
+        return httpx.Response(status)
+
+    source = XpressJobsSource(PoliteHttpClient(mock_client(handler), 0), zenrows_api_key="KEY")
+    with pytest.raises(ZenRowsLimitError):
+        await source.fetch("developer", 10)
+    with pytest.raises(ZenRowsLimitError):  # paused: no second request
+        await source.fetch("developer", 10)
+    assert calls == ["api.zenrows.com"]
+
+
+async def test_xpressjobs_ad_image_url_needs_no_request():
+    source = XpressJobsSource(PoliteHttpClient(mock_client(lambda r: httpx.Response(500)), 0))
+    assert await source.ad_image_url("https://xpress.jobs/jobs/view/349032") == \
+        "https://xpress.jobs/api/vacancy/getJobDescriptionImage?jobId=349032"
+    assert await source.ad_image_url("https://example.com/other") is None
 
 
 async def test_http_errors_become_source_errors():

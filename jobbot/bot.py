@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import logging
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from html import escape
 
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions, Update
@@ -27,7 +28,7 @@ from .channel_gate import ChannelGate
 from .formatting import TELEGRAM_MAX_CAPTION, format_job, telegram_length
 from .health import start_health_server
 from .job_service import PAGE_SIZE, FetchError, JobSearchService
-from .images import JobImages
+from .images import JobImages, Photo
 from .models import Job
 from .normalize import MAX_KEYWORD_LENGTH, normalize_keyword
 from .rate_limit import (
@@ -339,24 +340,45 @@ def job_keyboard(job: Job) -> InlineKeyboardMarkup | None:
     return InlineKeyboardMarkup([[InlineKeyboardButton(label, url=job.url)]])
 
 
+async def _send_photo(bot, chat_id: int, job: Job, photo: str | bytes, caption: str,
+                      keyboard: InlineKeyboardMarkup | None):
+    """The sent message, or None if Telegram rejected the photo."""
+    try:
+        return await bot.send_photo(chat_id, photo, caption=caption, parse_mode=ParseMode.HTML,
+                                    reply_markup=keyboard)
+    except BadRequest as exc:
+        log.warning("Photo for %s rejected (%s)", job.url, exc)
+        return None
+
+
 async def send_job(bot, chat_id: int, job: Job, index: int, images: JobImages | None = None,
-                   tag: str | None = None) -> None:
+                   tag: str | None = None, photo: Awaitable[Photo | None] | None = None) -> None:
     """One job per message: the ad image with the details as its caption when there is one,
     otherwise a text message; the link is an inline button under it either way.
-    tag: an optional first line, e.g. "🆕 New Match"."""
+    tag: an optional first line, e.g. "🆕 New Match".
+    photo: the job's photo lookup, already started (see start_photo_lookups); else it's looked up here."""
     keyboard = job_keyboard(job)
-    photo = await images.photo_for(job) if images is not None else None
-    if photo is not None:
+    if photo is None and images is not None:
+        photo = images.photo_for(job)
+    found = await photo if photo is not None else None
+    if found is not None:
         caption = format_job(job, index, include_link=keyboard is None, tag=tag)
         if telegram_length(caption) <= TELEGRAM_MAX_CAPTION:
-            try:
-                sent = await bot.send_photo(chat_id, photo, caption=caption,
-                                            parse_mode=ParseMode.HTML, reply_markup=keyboard)
-                if isinstance(photo, bytes) and getattr(sent, "photo", None):
+            sent = await _send_photo(bot, chat_id, job, found.file, caption, keyboard)
+            if found.is_ad_url and images is not None:
+                if sent is None:
+                    # Telegram couldn't fetch the URL itself: download the image here and upload it.
+                    data = await images.download(job, found.file)
+                    if data is not None:
+                        sent = await _send_photo(bot, chat_id, job, data, caption, keyboard)
+                if sent is None:
+                    images.no_ad_image(job.url)  # e.g. an XpressJobs job without one; rechecked later
+                elif getattr(sent, "photo", None):
                     images.remember(job.url, sent.photo[-1].file_id)  # reuse for every later send
+            if sent is None and found.logo:
+                sent = await _send_photo(bot, chat_id, job, found.logo, caption, keyboard)
+            if sent is not None:
                 return
-            except BadRequest as exc:
-                log.warning("Photo for %s rejected (%s); sending text instead", job.url, exc)
     if keyboard is not None:
         try:
             await bot.send_message(chat_id, format_job(job, index, include_link=False, tag=tag),
@@ -370,9 +392,27 @@ async def send_job(bot, chat_id: int, job: Job, index: int, images: JobImages | 
                            parse_mode=ParseMode.HTML, link_preview_options=_NO_PREVIEW)
 
 
+def start_photo_lookups(images: JobImages | None, jobs: Sequence[Job]) -> list[asyncio.Task[Photo | None] | None]:
+    """Start looking up every job's photo now, so each lookup (a light request) runs while
+    the jobs before it are being sent instead of after. Cancel the tasks when done."""
+    if images is None:
+        return [None] * len(jobs)
+    return [asyncio.create_task(images.photo_for(job)) for job in jobs]
+
+
+def cancel_photo_lookups(lookups: Sequence[asyncio.Task | None]) -> None:
+    for task in lookups:
+        if task is not None:
+            task.cancel()  # no-op for the ones already used
+
+
 async def send_jobs(bot, chat_id: int, jobs: list[Job], start_index: int, images: JobImages | None = None) -> None:
-    for offset, job in enumerate(jobs):
-        await send_job(bot, chat_id, job, start_index + offset, images)
+    lookups = start_photo_lookups(images, jobs)
+    try:
+        for offset, (job, photo) in enumerate(zip(jobs, lookups)):
+            await send_job(bot, chat_id, job, start_index + offset, images, photo=photo)
+    finally:
+        cancel_photo_lookups(lookups)
 
 
 async def _edit_or_send(status, chat_id: int, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
@@ -413,8 +453,12 @@ def build_application(
             log.warning("Could not register the bot's command menu", exc_info=True)
         if health_port is not None:
             app.bot_data["health_server"] = await start_health_server(health_port)
+        app.bot_data["refresher"] = asyncio.create_task(service.keep_fresh())
 
     async def post_shutdown(app: Application) -> None:
+        refresher = app.bot_data.get("refresher")
+        if refresher is not None:
+            refresher.cancel()
         server = app.bot_data.get("health_server")
         if server is not None:
             server.close()

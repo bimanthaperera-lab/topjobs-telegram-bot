@@ -12,7 +12,7 @@ class SourceError(RuntimeError):
 
 
 class SiteBlockedError(SourceError):
-    """The site answered 403/429: it is refusing or rate-limiting the bot."""
+    """The site answered 402/403/429: it is refusing or rate-limiting the bot."""
 
     def __init__(self, host: str, status: int, pause_secs: float) -> None:
         super().__init__(f"{host}: HTTP {status}; pausing requests for {round(pause_secs / 60)} min")
@@ -39,4 +39,7 @@ class JobSource(Protocol):
     # Optional extras (read with getattr):
     #   keyword_independent: bool  - fetch() returns the same list for every keyword,
     #                                so one cached fetch serves all keywords.
-    #   async fetch_image(job_url) -> bytes | None  - the job's ad image.
+    #   refreshed_in_background: bool - (keyword_independent too) too slow to fetch during a
+    #                                search: the service keeps its list fresh in the background.
+    #   async ad_image_url(job_url) -> str | None  - the URL of the job's ad image.
+    #   async download_image(image_url) -> bytes | None  - that image, if Telegram can't fetch it.

@@ -95,7 +95,7 @@ class FakeTopJobs:
     async def fetch(self, keyword, limit):
         return list(self.jobs)
 
-    async def fetch_image(self, url):
+    async def ad_image_url(self, url):
         return None  # text posts keep these tests simple
 
 
@@ -326,6 +326,15 @@ async def test_one_site_failing_still_posts_the_other(tmp_path):
     s = settings(tmp_path)
     bot, status = await post(s, [FakeTopJobs([tj(2), tj(1)]), FakeXpress(error=SourceError("xpress.jobs: HTTP 503"))], T0)
     assert status == 1  # the run shows red so the failure gets noticed
+    assert bot.titles() == se(2, 1)
+
+
+async def test_zenrows_out_of_credits_posts_topjobs_and_succeeds(tmp_path):
+    from jobbot.sources.xpressjobs import ZenRowsLimitError
+
+    s = settings(tmp_path)
+    bot, status = await post(s, [FakeTopJobs([tj(2), tj(1)]), FakeXpress(error=ZenRowsLimitError("HTTP 402"))], T0)
+    assert status == 0
     assert bot.titles() == se(2, 1)
 
 

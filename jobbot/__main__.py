@@ -20,7 +20,7 @@ from .site_health import AdminNotifier, SiteHealth
 from .sources import JobSource
 from .sources.http import PoliteHttpClient, build_http_client
 from .sources.topjobs import TopJobsSource
-from .sources.xpressjobs import XpressJobsSource
+from .sources.xpressjobs import IT_KEYWORDS, XpressJobsSource
 from .storage import Storage, StorageError
 
 log = logging.getLogger("jobbot")
@@ -31,7 +31,7 @@ def build_sources(settings: Settings, http: PoliteHttpClient) -> list[JobSource]
     if settings.topjobs_enabled:
         sources.append(TopJobsSource(http, category=settings.topjobs_category))
     if settings.xpressjobs_enabled:
-        sources.append(XpressJobsSource(http, settings.zenrows_api_key))
+        sources.append(XpressJobsSource(http, settings.zenrows_api_key, pool_keywords=IT_KEYWORDS))
     return sources
 
 

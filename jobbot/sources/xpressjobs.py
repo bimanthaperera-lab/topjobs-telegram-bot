@@ -13,7 +13,14 @@ has given written permission.
 XpressJobs blocks GitHub Actions' IP addresses and asked for requests to go
 through ZenRows instead: with ZENROWS_API_KEY set, every request is sent to the
 ZenRows API (GET https://api.zenrows.com/v1/?apikey=...&url=<the API URL>),
-which fetches the URL and returns XpressJobs' answer unchanged.
+which fetches the URL and returns XpressJobs' answer unchanged. When ZenRows
+refuses (402: out of credits, 429: too many requests), ZenRowsLimitError is
+raised: XpressJobs is skipped and the bot and channel carry on with TopJobs.
+
+Some jobs have an ad image: /api/vacancy/getJobDescriptionImage?jobId=<id>
+answers with the image, or 204 (no content) when the job has none. Its URL is
+passed to Telegram, which downloads it itself (no request from here, so no
+ZenRows credit and no blocked IP); the company logo is the fallback.
 """
 
 from __future__ import annotations
@@ -25,17 +32,24 @@ from typing import Any
 from urllib.parse import urlencode
 
 from ..models import Job
-from . import SourceError
+from . import SiteBlockedError, SitePausedError, SourceError
 from .http import PoliteHttpClient
 
 NAME = "XpressJobs"
 SEARCH_URL = "https://xpress.jobs/api/jobs/searchJobs"
 JOB_URL = "https://xpress.jobs/jobs/view/{job_id}"
+AD_IMAGE_URL = "https://xpress.jobs/api/vacancy/getJobDescriptionImage?jobId={job_id}"
 SORT_BY = "ExpiryDateOnWebsite DESC"
 MAX_PAGE_SIZE = 100  # one modest request; the API filters by keyword itself
 LATEST_SORT_BY = "JobId DESC"  # not offered in the site's UI, but the API accepts it: newest first
 ZENROWS_URL = "https://api.zenrows.com/v1/"
+# The bot's searches use one list of IT jobs, made from these searches and kept fresh
+# in the background, because the API takes 4-20s per search. They cover the bot's
+# categories (see categories.py).
+IT_KEYWORDS = ("software", "developer", "engineer", "qa", "devops", "cloud", "designer", "data", "security",
+               "support", "help desk", "network", "administrator", "project manager", "intern", "trainee")
 
+_JOB_ID = re.compile(r"^https://xpress\.jobs/jobs/view/(\d+)$")
 _BOILERPLATE = re.compile(r"\s*please refer (to )?the job advert(isement)? for (further|more) (information|details)\.?", re.I)
 
 
@@ -108,19 +122,31 @@ def parse_search_response(data: Any) -> list[Job]:
     return jobs
 
 
+class ZenRowsLimitError(SourceError):
+    """ZenRows refused the request (out of credits or too many requests): skip XpressJobs for now."""
+
+
 class XpressJobsSource:
     name = NAME
     sorted_newest_first = True
 
-    def __init__(self, http: PoliteHttpClient, zenrows_api_key: str | None = None) -> None:
+    def __init__(self, http: PoliteHttpClient, zenrows_api_key: str | None = None,
+                 pool_keywords: Sequence[str] = ()) -> None:
+        """pool_keywords: fetch() returns the newest jobs for these, whatever the keyword, so one
+        list serves every search; the search service refreshes it in the background."""
         self._http = http
         self._zenrows_api_key = zenrows_api_key or None
+        self._pool_keywords = tuple(pool_keywords)
+        self.keyword_independent = self.refreshed_in_background = bool(self._pool_keywords)
 
     async def _search(self, page: int, page_size: int, keyword: str, sort_by: str) -> list:
         params = {"page": page, "pageSize": page_size, "keyword": keyword, "sortBy": sort_by}
         if self._zenrows_api_key:
             target = f"{SEARCH_URL}?{urlencode(params)}"
-            response = await self._http.get(ZENROWS_URL, params={"apikey": self._zenrows_api_key, "url": target})
+            try:
+                response = await self._http.get(ZENROWS_URL, params={"apikey": self._zenrows_api_key, "url": target})
+            except (SiteBlockedError, SitePausedError) as exc:
+                raise ZenRowsLimitError(f"{NAME}: ZenRows limit reached ({exc})") from exc
         else:
             response = await self._http.get(SEARCH_URL, params=params, headers={"Accept": "application/json"})
         try:
@@ -132,9 +158,16 @@ class XpressJobsSource:
         return data
 
     async def fetch(self, keyword: str, limit: int) -> list[Job]:
+        if self._pool_keywords:
+            return await self.fetch_newest(self._pool_keywords)  # the whole pool: searches pick from it
         # The site's own frontend doubles single quotes before sending.
         data = await self._search(1, min(limit, MAX_PAGE_SIZE), keyword.replace("'", "''"), SORT_BY)
         return parse_search_response(data)[:limit]
+
+    async def ad_image_url(self, job_url: str) -> str | None:
+        """Where the job's ad image would be (no request: Telegram finds out if there is one)."""
+        match = _JOB_ID.match(job_url)
+        return AD_IMAGE_URL.format(job_id=match.group(1)) if match else None
 
     async def fetch_newest(self, keywords: Sequence[str]) -> list[Job]:
         """The newest jobs matching any of the keywords, newest first, without duplicates.

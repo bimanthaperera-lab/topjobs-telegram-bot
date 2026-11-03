@@ -1,12 +1,13 @@
 """IT-category search, job ad images (download once, reuse Telegram file_id)."""
 
+import asyncio
 from types import SimpleNamespace
 
 import httpx
 from telegram.error import BadRequest
 
-from jobbot.bot import send_job
-from jobbot.images import NO_IMAGE_RECHECK_SECS, JobImages
+from jobbot.bot import send_job, send_jobs
+from jobbot.images import NO_IMAGE_RECHECK_SECS, JobImages, Photo
 from jobbot.models import Job
 from jobbot.sources import SourceError
 from jobbot.sources.http import PoliteHttpClient
@@ -27,6 +28,11 @@ def test_finds_ad_image_inside_remark_only():
     assert find_ad_image_url("<html></html>", JOB_URL) is None
 
 
+def test_ad_image_url_spaces_are_encoded():
+    page = '<div id="remark"><img src="/logo/0000000375/4593cAI Transformation.png"></div>'
+    assert find_ad_image_url(page, JOB_URL) == "https://www.topjobs.lk/logo/0000000375/4593cAI%20Transformation.png"
+
+
 def client(handler):
     return PoliteHttpClient(httpx.AsyncClient(transport=httpx.MockTransport(handler)), 0)
 
@@ -45,27 +51,27 @@ async def test_category_mode_fetches_category_not_keyword():
     assert not TopJobsSource(client(handler)).keyword_independent
 
 
-async def test_fetch_image_downloads_page_then_image():
+async def test_ad_image_url_needs_only_the_job_page():
     requested = []
 
     def handler(request):
         requested.append(request.url.path)
-        if request.url.path.endswith(".png"):
-            return httpx.Response(200, content=b"\x89PNG-bytes", headers={"content-type": "image/png"})
         return httpx.Response(200, text=JOB_PAGE)
 
-    data = await TopJobsSource(client(handler)).fetch_image(JOB_URL)
-    assert data == b"\x89PNG-bytes"
-    assert requested == ["/employer/JobAdvertismentServlet", "/logo/DEFZZZ/1657c1255.png"]
+    url = await TopJobsSource(client(handler)).ad_image_url(JOB_URL)
+    assert url == "https://www.topjobs.lk/logo/DEFZZZ/1657c1255.png"
+    assert requested == ["/employer/JobAdvertismentServlet"]
 
 
-async def test_fetch_image_rejects_non_images():
+async def test_download_image():
     def handler(request):
         if request.url.path.endswith(".png"):
-            return httpx.Response(200, text="<html>error</html>", headers={"content-type": "text/html"})
-        return httpx.Response(200, text=JOB_PAGE)
+            return httpx.Response(200, content=b"\x89PNG-bytes", headers={"content-type": "image/png"})
+        return httpx.Response(200, text="<html>error</html>", headers={"content-type": "text/html"})
 
-    assert await TopJobsSource(client(handler)).fetch_image(JOB_URL) is None
+    source = TopJobsSource(client(handler))
+    assert await source.download_image("https://www.topjobs.lk/logo/DEFZZZ/1657c1255.png") == b"\x89PNG-bytes"
+    assert await source.download_image("https://www.topjobs.lk/oops") is None  # not an image
 
 
 async def test_one_category_fetch_serves_every_keyword(storage):
@@ -84,34 +90,44 @@ async def test_one_category_fetch_serves_every_keyword(storage):
 
 # --- JobImages -------------------------------------------------------------------------
 
-class ImageSource(FakeSource):
-    def __init__(self, image=b"img", fail=False):
-        super().__init__("Site A")
-        self.image = image
-        self.image_fail = fail
-        self.image_calls = 0
+IMG_URL = "https://x.lk/ad.png"
 
-    async def fetch_image(self, job_url):
+
+class ImageSource(FakeSource):
+    def __init__(self, image_url=IMG_URL, fail=False, data=b"img"):
+        super().__init__("Site A")
+        self.image_url = image_url
+        self.image_fail = fail
+        self.data = data
+        self.image_calls = 0
+        self.downloads = 0
+
+    async def ad_image_url(self, job_url):
         self.image_calls += 1
         if self.image_fail:
             raise SourceError("down")
-        return self.image
+        return self.image_url
+
+    async def download_image(self, image_url):
+        self.downloads += 1
+        return self.data
 
 
 JOB = make_jobs(1, source="Site A")[0]
+AD = Photo(IMG_URL, is_ad_url=True)
 
 
-async def test_image_downloaded_once_then_file_id_reused(storage):
+async def test_ad_image_url_found_once_then_file_id_reused(storage):
     source = ImageSource()
     images = JobImages(storage, [source])
-    assert await images.photo_for(JOB) == b"img"
+    assert await images.photo_for(JOB) == AD
     images.remember(JOB.url, "FILE123")
-    assert await images.photo_for(JOB) == "FILE123"
+    assert await images.photo_for(JOB) == Photo("FILE123")
     assert source.image_calls == 1
 
 
 async def test_job_without_image_is_rechecked_later(storage, clock):
-    source = ImageSource(image=None)
+    source = ImageSource(image_url=None)
     images = JobImages(storage, [source])
     assert await images.photo_for(JOB) is None
     assert await images.photo_for(JOB) is None
@@ -126,7 +142,7 @@ async def test_image_errors_are_not_remembered(storage):
     images = JobImages(storage, [source])
     assert await images.photo_for(JOB) is None
     source.image_fail = False
-    assert await images.photo_for(JOB) == b"img"
+    assert await images.photo_for(JOB) == AD
 
 
 async def test_images_disabled_or_unsupported_source(storage):
@@ -139,26 +155,27 @@ LOGO = "https://cdn.example.lk/logo_1.jpg"
 
 async def test_logo_used_when_there_is_no_ad_image(storage):
     job = Job(url="https://x.lk/1", title="Dev", source="Site A", logo_url=LOGO)
-    assert await JobImages(storage, [FakeSource("Site A")]).photo_for(job) == LOGO
-    assert await JobImages(storage, [ImageSource(image=None)]).photo_for(job) == LOGO
+    assert await JobImages(storage, [FakeSource("Site A")]).photo_for(job) == Photo(LOGO)
+    assert await JobImages(storage, [ImageSource(image_url=None)]).photo_for(job) == Photo(LOGO)
     assert await JobImages(storage, [ImageSource()], enabled=False).photo_for(job) is None
 
 
 async def test_ad_image_preferred_over_logo(storage):
     job = Job(url="https://x.lk/1", title="Dev", source="Site A", logo_url=LOGO)
-    assert await JobImages(storage, [ImageSource()]).photo_for(job) == b"img"
+    assert await JobImages(storage, [ImageSource()]).photo_for(job) == Photo(IMG_URL, is_ad_url=True, logo=LOGO)
 
 
 # --- sending a job as a photo ------------------------------------------------------------
 
 class PhotoBot:
-    def __init__(self, reject_photo=False):
+    def __init__(self, reject_photo=False, reject_urls=False):
         self.sent = []
         self.reject_photo = reject_photo
+        self.reject_urls = reject_urls  # like Telegram failing to fetch a URL itself
 
     async def send_photo(self, chat_id, photo, **kwargs):
-        if self.reject_photo:
-            raise BadRequest("Photo_invalid_dimensions")
+        if self.reject_photo or (self.reject_urls and isinstance(photo, str) and photo.startswith("https://")):
+            raise BadRequest("Wrong file identifier/http url specified")
         self.sent.append(SimpleNamespace(kind="photo", photo=photo, **kwargs))
         return SimpleNamespace(photo=[SimpleNamespace(file_id="small"), SimpleNamespace(file_id="BIG")])
 
@@ -166,18 +183,50 @@ class PhotoBot:
         self.sent.append(SimpleNamespace(kind="text", text=text, **kwargs))
 
 
-async def test_job_sent_as_photo_with_caption_and_button(storage):
-    images = JobImages(storage, [ImageSource()])
+async def test_job_sent_as_photo_url_with_caption_and_button(storage):
+    source = ImageSource()
     bot = PhotoBot()
     job = Job(url="https://x.lk/1", title="Backend Developer", company="Acme", source="Site A")
-    await send_job(bot, 42, job, 1, images)
+    await send_job(bot, 42, job, 1, JobImages(storage, [source]))
     (msg,) = bot.sent
-    assert msg.kind == "photo" and msg.photo == b"img"
+    assert msg.kind == "photo" and msg.photo == IMG_URL  # Telegram fetches it; nothing downloaded here
+    assert source.downloads == 0
     assert msg.caption.startswith("<b>1. Backend Developer")
     assert "<a href" not in msg.caption
     assert msg.reply_markup.inline_keyboard[0][0].url == "https://x.lk/1"
     # The largest size's file_id is stored for reuse.
     assert storage.get_job_photo("https://x.lk/1")[0] == "BIG"
+
+
+async def test_image_downloaded_when_telegram_cannot_fetch_the_url(storage):
+    source = ImageSource()
+    bot = PhotoBot(reject_urls=True)
+    await send_job(bot, 42, Job(url="https://x.lk/1", title="Dev", source="Site A"), 1, JobImages(storage, [source]))
+    (msg,) = bot.sent
+    assert msg.kind == "photo" and msg.photo == b"img"
+    assert source.downloads == 1
+    assert storage.get_job_photo("https://x.lk/1")[0] == "BIG"
+
+
+async def test_logo_used_after_ad_image_fails(storage):
+    class UrlOnlySource(FakeSource):
+        async def ad_image_url(self, job_url):
+            return IMG_URL
+
+    class AdUrlRejectingBot(PhotoBot):
+        async def send_photo(self, chat_id, photo, **kwargs):
+            if photo == IMG_URL:
+                raise BadRequest("Wrong type of the web page content")
+            return await super().send_photo(chat_id, photo, **kwargs)
+
+    bot = AdUrlRejectingBot()
+    job = Job(url="https://x.lk/1", title="Dev", source="Site A", logo_url=LOGO)
+    await send_job(bot, 42, job, 1, JobImages(storage, [UrlOnlySource("Site A")]))
+    (msg,) = bot.sent
+    assert msg.kind == "photo" and msg.photo == LOGO
+    assert storage.get_job_photo(job.url)[0] is None  # recorded: no ad image
+    images = JobImages(storage, [UrlOnlySource("Site A")])
+    assert await images.photo_for(job) == Photo(LOGO)  # the ad image isn't tried again until the recheck
 
 
 async def test_job_sent_with_logo_and_short_description(storage):
@@ -206,3 +255,25 @@ async def test_too_long_caption_falls_back_to_text(storage):
     await send_job(bot, 42, job, 1, JobImages(storage, [ImageSource()]))
     (msg,) = bot.sent
     assert msg.kind == "text"
+
+
+async def test_photo_lookups_start_before_the_first_send(storage):
+    started = []
+    release = asyncio.Event()
+
+    class SlowSource(ImageSource):
+        async def ad_image_url(self, job_url):
+            started.append(job_url)
+            await release.wait()
+            return IMG_URL
+
+    jobs = make_jobs(3, source="Site A")
+    bot = PhotoBot()
+    sending = asyncio.create_task(send_jobs(bot, 42, jobs, 1, JobImages(storage, [SlowSource()])))
+    for _ in range(3):
+        await asyncio.sleep(0)
+    assert started == [j.url for j in jobs]  # every lookup running while the first job waits
+    release.set()
+    await sending
+    assert [m.caption.split("</b>")[0] for m in bot.sent] == ["<b>1. " + jobs[0].title, "<b>2. " + jobs[1].title,
+                                                               "<b>3. " + jobs[2].title]
