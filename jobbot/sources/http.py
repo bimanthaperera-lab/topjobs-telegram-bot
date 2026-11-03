@@ -2,7 +2,7 @@
 
 - At most one request per `min_interval_secs` per host, across all users.
 - Timeouts, connection errors and 5xx answers are retried with exponential backoff.
-- 403/429 answers are not retried: the host is paused (honouring Retry-After) and
+- 402/403/429 answers are not retried: the host is paused (honouring Retry-After) and
   every request to it fails fast until the pause ends.
 """
 
@@ -20,7 +20,7 @@ import httpx
 from . import SiteBlockedError, SitePausedError, SourceError
 
 DEFAULT_USER_AGENT = "TopJobsTelegramBot/1.0 (+https://t.me/TopJobsSearch_Bot)"
-BLOCK_STATUSES = frozenset({403, 429})
+BLOCK_STATUSES = frozenset({402, 403, 429})  # 402: a paid API (ZenRows) out of credits
 MAX_PAUSE_SECS = 24 * 3600
 
 

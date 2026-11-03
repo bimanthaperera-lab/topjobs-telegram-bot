@@ -49,6 +49,8 @@ outdated". If it has none, the bot shows the other site's jobs with a note sayin
 | | TopJobs.lk | XpressJobs |
 |---|---|---|
 | How | HTML search page, `GET /applicant/vacancybyfunctionalarea.jsp?txtKeyWord=` | JSON API, `GET /api/jobs/searchJobs?keyword=` |
+| When | The IT category once per `CACHE_TTL_HOURS`, at the first search after that | 16 IT keyword searches every half `CACHE_TTL_HOURS`, **in the background** (the API takes 4-20s per search, so searches never wait for it) |
+| Ad image | On the job page | `/api/vacancy/getJobDescriptionImage?jobId=` (204 when none); company logo otherwise |
 | Order | Newest first, by opening date | Re-sorted newest first by `jobId` |
 | Title / company / location | yes | yes |
 | Posted date | yes | when the API provides it |
@@ -135,7 +137,7 @@ token redaction.
 | `TOPJOBS_CATEGORY` | `SDQ` | TopJobs category to search within (SDQ = IT software). Set it empty to search all jobs by keyword |
 | `SEND_JOB_IMAGES` | true | Send each job's ad image as a photo |
 | `XPRESSJOBS_ENABLED` | **false** | Search XpressJobs. Turn on only with their permission |
-| `ZENROWS_API_KEY` | unset | Send XpressJobs requests through ZenRows (XpressJobs blocks GitHub's IPs) |
+| `ZENROWS_API_KEY` | unset | Send XpressJobs requests through ZenRows (XpressJobs blocks GitHub's IPs). Out of ZenRows credits: XpressJobs is skipped, TopJobs carries on |
 | `SCRAPE_MIN_INTERVAL_SECS` | 2 | Minimum gap between requests to the same site, across all users |
 | `HTTP_TIMEOUT_SECS` | 20 | Request timeout |
 | `HTTP_RETRIES` | 2 | Retries for timeouts and 5xx errors, waiting 2s, then 4s |
@@ -268,8 +270,8 @@ may start scheduled runs a few minutes late. Each run:
    which keeps civil engineers, security guards and AC technicians out. A vacancy listed twice is
    posted once.
 3. **Posts up to 5 jobs from each site** (5 + 5 with both on), each as its own message (the ad
-   image with the **View & Apply** button; XpressJobs has no ad images, so its jobs come with the
-   company logo and a short description, or as text when there's no logo):
+   image with the **View & Apply** button; XpressJobs jobs come with their ad image when they have
+   one, else the company logo, or as text when there's neither):
    - **New jobs first**, tagged **🆕 New Match**: jobs that appeared since the alerts started and
      haven't been posted yet. More than 5 new on a site? The rest go first in the next run. A job
      stays "new" for 48 hours. Both sites' new jobs are posted before any older job.

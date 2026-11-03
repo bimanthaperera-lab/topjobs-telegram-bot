@@ -20,8 +20,10 @@ up to NOTIFY_PER_SITE (5) jobs from each site, so 5 + 5 with both on:
 
 The new jobs of both sites go out first, then the pool jobs. Each job is the ad
 image with the details as its caption and a "View & Apply" button; XpressJobs
-has no ad images, so its jobs are posted with the company logo (or as text when
-there's none) and the same button.
+jobs are posted with their ad image when they have one, else the company logo
+(or as text when there's neither), with the same button. If ZenRows (see
+sources/xpressjobs.py) is out of credits, XpressJobs is skipped and only TopJobs
+is posted; the run still succeeds.
 
 What was seen and posted is kept in NOTIFY_STATE_FILE (JSON), carried between
 runs by the Actions cache. Jobs already listed when tracking starts, or when
@@ -57,7 +59,7 @@ from dotenv import load_dotenv
 from telegram.error import TelegramError
 from telegram.ext import AIORateLimiter, ExtBot
 
-from .bot import send_job
+from .bot import cancel_photo_lookups, send_job, start_photo_lookups
 from .config import ConfigError, _bool, _int, _required
 from .images import JobImages
 from .logging_setup import setup_logging
@@ -66,7 +68,7 @@ from .sources import JobSource
 from .sources.http import PoliteHttpClient, build_http_client
 from .sources.topjobs import NAME as TOPJOBS_NAME
 from .sources.topjobs import TopJobsSource
-from .sources.xpressjobs import XpressJobsSource
+from .sources.xpressjobs import XpressJobsSource, ZenRowsLimitError
 from .storage import Storage
 
 log = logging.getLogger("jobbot.notify")
@@ -281,8 +283,11 @@ class TopJobsCategories:
         lists = [await source.fetch(keyword, limit) for source in self._sources]
         return list({j.url: j for j in _interleave(lists)}.values())  # newest of each category first
 
-    async def fetch_image(self, job_url: str) -> bytes | None:
-        return await self._sources[0].fetch_image(job_url)
+    async def ad_image_url(self, job_url: str) -> str | None:
+        return await self._sources[0].ad_image_url(job_url)
+
+    async def download_image(self, image_url: str) -> bytes | None:
+        return await self._sources[0].download_image(image_url)
 
 
 def _unique(jobs: list[Job]) -> list[Job]:
@@ -318,6 +323,9 @@ async def run(settings: NotifySettings, sources: Sequence[JobSource], bot, now: 
     for source in sources:
         try:
             jobs = await _fetch_it_jobs(source)
+        except ZenRowsLimitError as exc:  # out of ZenRows credits: post TopJobs only, run stays green
+            log.warning("Skipping %s: %s", source.name, exc)
+            continue
         except Exception as exc:  # one site failing must not stop the others' posts
             log.error("Fetching %s failed: %s", source.name, exc)
             errors.append(exc)
@@ -336,11 +344,13 @@ async def run(settings: NotifySettings, sources: Sequence[JobSource], bot, now: 
         return status
 
     images = JobImages(Storage(":memory:"), sources, enabled=settings.send_images)
+    lookups = start_photo_lookups(images, [job for job, _ in picks])
     try:
-        for job, is_new in picks:
-            await send_job(bot, settings.chat_id, job, None, images, tag=NEW_TAG if is_new else None)
+        for (job, is_new), photo in zip(picks, lookups):
+            await send_job(bot, settings.chat_id, job, None, images, tag=NEW_TAG if is_new else None, photo=photo)
             state.posted[job.url] = now  # recorded one by one: a failed run never reposts these early
     finally:
+        cancel_photo_lookups(lookups)
         save_state(settings.state_file, state)
     log.info("Posted %d jobs (%d new)", len(picks), sum(is_new for _, is_new in picks))
     return status

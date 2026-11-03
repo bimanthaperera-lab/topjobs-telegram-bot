@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-from urllib.parse import urlencode, urljoin
+from urllib.parse import quote, urlencode, urljoin
 
 from bs4 import BeautifulSoup
 
@@ -37,6 +37,7 @@ MAX_IMAGE_BYTES = 10 * 1024 * 1024  # Telegram's photo upload limit
 _ROW_ID = re.compile(r"^tr\d+$")
 _BOILERPLATE_NOTE = re.compile(r"^\s*please refer( to)? the (vacancy|advert(isement)?)\.?\s*$", re.I)
 _WHITESPACE = re.compile(r"\s+")
+_URL_SAFE = "%/:?&=#~+!$,;'@()*[]"  # keep URL syntax and existing escapes; quote the rest
 
 
 def _clean(text: str | None) -> str | None:
@@ -103,7 +104,8 @@ def find_ad_image_url(html: str, page_url: str) -> str | None:
     img = remark.find("img", src=True) if remark else None
     if img is None:
         return None
-    url = urljoin(page_url, img["src"].strip())
+    # Quoted: some file names have spaces, which Telegram rejects in a photo URL.
+    url = quote(urljoin(page_url, img["src"].strip()), safe=_URL_SAFE)
     return url if url.lower().startswith(("https://", "http://")) else None
 
 
@@ -129,16 +131,17 @@ class TopJobsSource:
         jobs = await asyncio.to_thread(parse_search_page, html)
         return jobs[:limit]
 
-    async def fetch_image(self, job_url: str) -> bytes | None:
-        """Download the job's ad image, or None if the job has none.
+    async def ad_image_url(self, job_url: str) -> str | None:
+        """The URL of the job's ad image, or None if the job has none.
 
-        Two light requests (the job page, then its image), spaced like a browser
-        loading a page rather than like separate searches.
+        One light request (the job page), spaced like a browser loading a page
+        rather than like a separate search.
         """
         page = await self._http.get(job_url, min_interval=IMAGE_REQUEST_GAP_SECS)
-        image_url = await asyncio.to_thread(find_ad_image_url, page.text, str(page.url))
-        if image_url is None:
-            return None
+        return await asyncio.to_thread(find_ad_image_url, page.text, str(page.url))
+
+    async def download_image(self, image_url: str) -> bytes | None:
+        """The image itself, for when Telegram can't fetch its URL on its own."""
         image = await self._http.get(image_url, min_interval=IMAGE_REQUEST_GAP_SECS)
         if not image.headers.get("content-type", "").startswith("image/"):
             return None

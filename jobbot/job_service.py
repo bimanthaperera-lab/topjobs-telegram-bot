@@ -24,6 +24,8 @@ FETCH_LIMIT = 500
 SESSION_MAX_AGE_SECS = 24 * 3600
 # When a site can't be reached, results up to this old are shown (marked as possibly outdated).
 STALE_MAX_SECS = 48 * 3600
+# How often to check whether a background-refreshed site's list is due for a refresh.
+REFRESH_CHECK_SECS = 10 * 60
 
 
 class FetchError(RuntimeError):
@@ -136,6 +138,8 @@ class JobSearchService:
             set() if rank_results else {s.name for s in self._sources if s.sorted_newest_first}
         )
         self._in_flight: dict[str, asyncio.Task[list[Job]]] = {}
+        # Too slow to fetch during a search: kept fresh by keep_fresh() instead.
+        self._background = [s for s in self._sources if getattr(s, "refreshed_in_background", False)]
 
     @staticmethod
     def _cache_key(source: JobSource, keyword: str) -> str:
@@ -172,6 +176,8 @@ class JobSearchService:
             hit = self._storage.get_cached_jobs(key, self._cache_ttl_secs)
             if hit is not None:
                 cached[source.name] = hit.jobs
+            elif source in self._background:
+                continue  # never wait for it: older results below, or nothing until the refresh lands
             elif key in self._in_flight:
                 waiting[source.name] = self._in_flight[key]
             else:
@@ -266,6 +272,26 @@ class JobSearchService:
         self._storage.save_cached_jobs(key, found)
         self._report(self._health.record_success(source.name) if self._health else None)
         return found
+
+    async def keep_fresh(self) -> None:
+        """Run forever: refresh the background sites' lists whenever they are due."""
+        while True:
+            await self.refresh_due()
+            await asyncio.sleep(REFRESH_CHECK_SECS)
+
+    async def refresh_due(self) -> None:
+        """Fetch each background site whose cached list is missing or older than half the
+        cache TTL, so searches always find a fresh one."""
+        for source in self._background:
+            key = self._cache_key(source, "")
+            if self._storage.get_cached_jobs(key, self._cache_ttl_secs / 2) is not None:
+                continue
+            log.info("Refreshing %s's job list in the background", source.name)
+            try:
+                await self._fetch_and_cache(source, key, "")
+            except Exception as exc:  # tried again at the next check
+                log.error("Background refresh of %s failed: %s", source.name, exc,
+                          exc_info=None if isinstance(exc, SourceError) else exc)
 
     def set_notifier(self, notify: Notify | None) -> None:
         self._notify = notify
