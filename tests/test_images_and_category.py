@@ -4,7 +4,8 @@ import asyncio
 from types import SimpleNamespace
 
 import httpx
-from telegram.error import BadRequest
+import pytest
+from telegram.error import BadRequest, Forbidden, NetworkError, TimedOut
 
 from jobbot.bot import send_job, send_jobs
 from jobbot.images import NO_IMAGE_RECHECK_SECS, JobImages, Photo
@@ -246,6 +247,41 @@ async def test_rejected_photo_falls_back_to_text(storage):
                    JobImages(storage, [ImageSource()]))
     (msg,) = bot.sent
     assert msg.kind == "text"
+
+
+async def test_photo_timeout_falls_back_and_the_rest_still_sent(storage):
+    """Telegram still fetching a photo URL at the timeout must not stop the page (it used to
+    end the search after the jobs before it)."""
+    class FlakyBot(PhotoBot):
+        async def send_photo(self, chat_id, photo, **kwargs):
+            assert kwargs["read_timeout"] >= 30
+            if photo == IMG_URL:
+                raise TimedOut()
+            if kwargs["caption"].startswith("<b>2. "):
+                raise NetworkError("Bad Gateway")
+            return await super().send_photo(chat_id, photo, **kwargs)
+
+        async def send_message(self, chat_id, text, **kwargs):
+            if text.startswith("<b>2. "):
+                raise NetworkError("Bad Gateway")
+            await super().send_message(chat_id, text, **kwargs)
+
+    jobs = make_jobs(3, source="Site A")
+    bot = FlakyBot()
+    await send_jobs(bot, 42, jobs, 1, JobImages(storage, [ImageSource()]))
+    # Jobs 1 and 3: the ad image URL timed out, so it was downloaded and uploaded instead.
+    # Job 2: nothing could be sent, and job 3 still was.
+    assert [(m.kind, m.photo, m.caption.split("</b>")[0]) for m in bot.sent] == [
+        ("photo", b"img", "<b>1. " + jobs[0].title), ("photo", b"img", "<b>3. " + jobs[2].title)]
+
+
+async def test_blocked_user_stops_sending(storage):
+    class BlockedBot(PhotoBot):
+        async def send_photo(self, chat_id, photo, **kwargs):
+            raise Forbidden("bot was blocked by the user")
+
+    with pytest.raises(Forbidden):
+        await send_jobs(BlockedBot(), 42, make_jobs(3, source="Site A"), 1, JobImages(storage, [ImageSource()]))
 
 
 async def test_too_long_caption_falls_back_to_text(storage):
