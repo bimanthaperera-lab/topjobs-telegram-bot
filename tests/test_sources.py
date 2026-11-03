@@ -8,7 +8,12 @@ import pytest
 from jobbot.sources import SourceError
 from jobbot.sources.http import PoliteHttpClient
 from jobbot.sources.topjobs import TopJobsSource, parse_search_page
-from jobbot.sources.xpressjobs import XpressJobsSource, ZenRowsLimitError, parse_search_response
+from jobbot.sources.xpressjobs import (
+    ZENROWS_TIMEOUT_SECS,
+    XpressJobsSource,
+    ZenRowsLimitError,
+    parse_search_response,
+)
 
 # Trimmed copy of a real TopJobs.lk results row structure.
 TOPJOBS_ROW = """
@@ -148,6 +153,7 @@ async def test_xpressjobs_through_zenrows():
 
     def handler(request):
         seen["url"] = request.url
+        seen["timeout"] = request.extensions["timeout"]
         return httpx.Response(200, json=XPRESS_ITEMS)
 
     http = PoliteHttpClient(mock_client(handler), 0)
@@ -159,6 +165,54 @@ async def test_xpressjobs_through_zenrows():
     assert str(target.copy_with(query=None)) == "https://xpress.jobs/api/jobs/searchJobs"
     assert dict(target.params) == {"page": "1", "pageSize": "30", "keyword": "o''neil",
                                    "sortBy": "ExpiryDateOnWebsite DESC"}
+    assert seen["timeout"]["read"] == ZENROWS_TIMEOUT_SECS >= 60  # the client's 20s timed out
+
+
+def keyword_handler(failing: set[str], calls: list[str]):
+    """XpressJobs answering with one job per keyword, and 503 for the failing ones."""
+    def handler(request):
+        keyword = request.url.params["keyword"]
+        calls.append(keyword)
+        if keyword in failing:
+            return httpx.Response(503)
+        return httpx.Response(200, json=[{"jobId": len(calls), "jobTitle": f"{keyword} job"}])
+    return handler
+
+
+async def test_fetch_newest_skips_a_failed_keyword():
+    calls = []
+    http = PoliteHttpClient(mock_client(keyword_handler({"data"}, calls)), 0, retries=0)
+    jobs = await XpressJobsSource(http).fetch_newest(["software", "data", "network"])
+    assert calls == ["software", "data", "network"]
+    assert [j.title for j in jobs] == ["network job", "software job"]
+
+
+async def test_fetch_newest_gives_up_after_repeated_failures():
+    calls = []
+    http = PoliteHttpClient(mock_client(keyword_handler({"data", "cloud"}, calls)), 0, retries=0)
+    jobs = await XpressJobsSource(http).fetch_newest(["software", "data", "cloud", "network"])
+    assert calls == ["software", "data", "cloud"]  # stopped after MAX_FAILED_KEYWORDS failures
+    assert [j.title for j in jobs] == ["software job"]
+
+
+async def test_fetch_newest_raises_when_every_keyword_fails():
+    calls = []
+    http = PoliteHttpClient(mock_client(keyword_handler({"software", "data"}, calls)), 0, retries=0)
+    with pytest.raises(SourceError, match="HTTP 503"):
+        await XpressJobsSource(http).fetch_newest(["software", "data", "network"])
+
+
+async def test_fetch_newest_stops_when_zenrows_refuses():
+    calls = []
+
+    def handler(request):
+        calls.append(request.url.host)
+        return httpx.Response(402)
+
+    source = XpressJobsSource(PoliteHttpClient(mock_client(handler), 0), zenrows_api_key="KEY")
+    with pytest.raises(ZenRowsLimitError):
+        await source.fetch_newest(["software", "data"])
+    assert calls == ["api.zenrows.com"]
 
 
 @pytest.mark.parametrize("status", [402, 429])
