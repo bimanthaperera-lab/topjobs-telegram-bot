@@ -25,6 +25,7 @@ ZenRows credit and no blocked IP); the company logo is the fallback.
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Sequence
 from datetime import datetime
@@ -35,6 +36,8 @@ from ..models import Job
 from . import SiteBlockedError, SitePausedError, SourceError
 from .http import PoliteHttpClient
 
+log = logging.getLogger(__name__)
+
 NAME = "XpressJobs"
 SEARCH_URL = "https://xpress.jobs/api/jobs/searchJobs"
 JOB_URL = "https://xpress.jobs/jobs/view/{job_id}"
@@ -43,6 +46,11 @@ SORT_BY = "ExpiryDateOnWebsite DESC"
 MAX_PAGE_SIZE = 100  # one modest request; the API filters by keyword itself
 LATEST_SORT_BY = "JobId DESC"  # not offered in the site's UI, but the API accepts it: newest first
 ZENROWS_URL = "https://api.zenrows.com/v1/"
+# The API takes 4-20s per search, and ZenRows adds its own time on top: 20s timed out.
+ZENROWS_TIMEOUT_SECS = 60
+# fetch_newest gives up on the remaining keywords after this many fail, so a slow
+# day can't run past the alerts job's time limit (each failure is up to 3 timeouts).
+MAX_FAILED_KEYWORDS = 2
 # The bot's searches use one list of IT jobs, made from these searches and kept fresh
 # in the background, because the API takes 4-20s per search. They cover the bot's
 # categories (see categories.py).
@@ -144,7 +152,8 @@ class XpressJobsSource:
         if self._zenrows_api_key:
             target = f"{SEARCH_URL}?{urlencode(params)}"
             try:
-                response = await self._http.get(ZENROWS_URL, params={"apikey": self._zenrows_api_key, "url": target})
+                response = await self._http.get(ZENROWS_URL, params={"apikey": self._zenrows_api_key, "url": target},
+                                                timeout=ZENROWS_TIMEOUT_SECS)
             except (SiteBlockedError, SitePausedError) as exc:
                 raise ZenRowsLimitError(f"{NAME}: ZenRows limit reached ({exc})") from exc
         else:
@@ -174,8 +183,28 @@ class XpressJobsSource:
 
         For the channel alerts, which pick the software roles themselves: one
         request per keyword, each the newest MAX_PAGE_SIZE matches.
+
+        A keyword whose search fails is skipped: the others' jobs are still returned.
+        Raises only when no keyword's search worked, or when ZenRows refuses.
         """
         items: list = []
+        failed: list[SourceError] = []
+        succeeded = 0
         for keyword in keywords:
-            items.extend(await self._search(1, MAX_PAGE_SIZE, keyword.replace("'", "''"), LATEST_SORT_BY))
+            try:
+                items.extend(await self._search(1, MAX_PAGE_SIZE, keyword.replace("'", "''"), LATEST_SORT_BY))
+            except ZenRowsLimitError:
+                raise  # every later request would be refused too
+            except SourceError as exc:
+                log.warning("%s: search for %r failed: %s", NAME, keyword, exc)
+                failed.append(exc)
+                if len(failed) >= MAX_FAILED_KEYWORDS:
+                    break
+            else:
+                succeeded += 1
+        if failed and not succeeded:
+            raise failed[-1]
+        if failed:
+            log.warning("%s: using the jobs of %d of %d keyword searches (%d failed)",
+                        NAME, succeeded, len(keywords), len(failed))
         return parse_search_response(items)
